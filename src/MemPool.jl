@@ -37,8 +37,30 @@ end
 
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file))
 
+"""
+`approx_size(d)`
+
+Returns the size of `d` in bytes used for accounting in MemPool datastore.
+"""
+function approx_size(d)
+    Base.summarysize(d) # note: this is accurate but expensive
+end
+
+function approx_size{T}(d::Array{T})
+    if isbits(T)
+        sizeof(d)
+    else
+        Base.summarysize(d)
+    end
+end
+
+function approx_size(xs::Array{String})
+    # doesn't check for redundant references, but
+    # really super fast in comparison to summarysize
+    sum(map(sizeof, xs)) + 4 * length(xs)
+end
+
 include("io.jl")
-include("util.jl")
 include("datastore.jl")
 
 __init__() = global session = "sess-" * randstring(5)

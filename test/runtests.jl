@@ -55,12 +55,15 @@ end
 
 @testset "set-get-delete" begin
     r1 = poolset([1,2])
-    r2 = poolset([3,4], 2)
+    r2 = poolset(["abc","def"], 2)
+    r3 = poolset([Ref(1),Ref(2)], 2)
     @test poolget(r1) == [1,2]
-    @test poolget(r2) == [3,4]
+    @test poolget(r2) == ["abc","def"]
+    @test map(getindex, poolget(r3)) == [1,2]
     pooldelete(r1)
     @test_throws KeyError poolget(r1)
     pooldelete(r2)
+    pooldelete(r3)
     @test_throws KeyError poolget(r2)
     @test isempty(MemPool.lru_order)
     @test fetch(@spawnat 2 isempty(MemPool.lru_order))
