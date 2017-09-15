@@ -18,11 +18,11 @@ isinmemory(x::RefState) = !isnull(x.data)
 isondisk(x::RefState) = !isnull(x.file)
 
 const datastore = Dict{Int,RefState}()
-const counter = Ref(0)
+const id_counter = Ref(0)
 
 function poolset(x, pid=myid())
     if pid == myid()
-        id = counter[] += 1
+        id = id_counter[] += 1
         sz = approx_size(x)
         lru_free(sz)
         datastore[id] = RefState(sz,

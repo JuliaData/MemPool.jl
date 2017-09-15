@@ -1,4 +1,8 @@
+__precompile__()
+
 module MemPool
+
+import Base: serialize, deserialize
 
 ## Wrapping-unwrapping of payloads:
 

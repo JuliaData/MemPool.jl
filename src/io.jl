@@ -1,5 +1,3 @@
-import Base: serialize, deserialize
-
 ##### Array{T} #####
 
 struct MMSer{T} end # sentinal type used in deserialize to switch to our
