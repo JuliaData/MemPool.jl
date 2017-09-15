@@ -24,20 +24,23 @@ function poolset(x, pid=myid())
     if pid == myid()
         id = counter[] += 1
         sz = approx_size(x)
+        lru_free(sz)
         datastore[id] = RefState(sz,
                                  Nullable{Any}(x),
                                  Nullable{String}(),
                                  true)
+        lru_touch(id, sz)
         DRef(myid(), id)
     else
         # use our serialization
         remotecall_fetch(pid, MMWrap(x)) do wx
+            # todo: try to evict here before deserializing...
             poolset(unwrap_payload(wx), pid)
         end
     end
 end
 
-function poolget(r::Union{MMWrap, FileRef})
+function poolget(r::FileRef)
     unwrap_payload(r)
 end
 
@@ -45,50 +48,67 @@ function poolget(r::DRef)
     if r.owner == myid()
         _getlocal(r.id, false)
     else
-        remotecall_fetch(r.owner, r) do r
-            MMWrap(_getlocal(r.id, true))
+        try
+            remotecall_fetch(r.owner, r) do r
+                MMWrap(_getlocal(r.id, true))
+            end
+        catch err
+            if isa(err, RemoteException)
+                if isa(err.captured.ex, KeyError)
+                    rethrow(err.captured.ex)
+                end
+            end
+            rethrow(err)
         end
     end |> unwrap_payload
 end
 
-function _getlocal(id, preferfile)
+function _getlocal(id, remote)
     state = datastore[id]
-    if preferfile
+    if remote
         if isondisk(state)
             return FileRef(get(state.file))
         elseif isinmemory(state)
+            lru_touch(id, state.size)
             return get(state.data)
         end
     else
+        # local
         if isinmemory(state)
+            lru_touch(id, state.size)
             return get(state.data)
         elseif isondisk(state)
-            return FileRef(get(state.file))
+            # TODO: get memory mapped size and not count it as
+            # much as local process size
+            lru_free(state.size)
+            lru_touch(id, state.size) # load back to memory
+            return unwrap_payload(FileRef(get(state.file)))
         end
     end
     error("ref id $id not found in memory or on disk!")
 end
 
 function pooldelete(r::DRef)
-    if r.owner == myid()
-        state = datastore[r.id]
-        if isondisk(state)
-            rm(get(state.file))
-        end
-        # release
-        state.data = Nullable{Any}()
-        datastore[r.id] = nothing
-        nothing
-    else
-        remotecall_fetch(pooldelete, r.owner, r)
+    if r.owner != myid()
+        return remotecall_fetch(pooldelete, r.owner, r)
     end
+
+    state = datastore[r.id]
+    if isondisk(state)
+        rm(get(state.file))
+    end
+    # release
+    state.data = Nullable{Any}()
+    delete!(lru_order, r.id)
+    delete!(datastore, r.id)
+    nothing
 end
 
 default_path(r::DRef) = ".mempool/$session-$(r.owner)/$(r.id)"
 
 function movetodisk(r::DRef, path=default_path(r), keepinmemory=false) 
     if r.owner != myid()
-        remotecall_fetch(movetodisk, r.owner, r, path)
+        return remotecall_fetch(movetodisk, r.owner, r, path)
     end
 
     mkpath(dirname(path))
@@ -103,6 +123,7 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     s.file = Nullable(path)
     if !keepinmemory
         s.data = Nullable{Any}()
+        delete!(lru_order, r.id)
     end
 
     return FileRef(path)
@@ -165,8 +186,8 @@ function lru_evictable(required=0)
     return evictable
 end
 
-function compact_lru()
-    list = lru_evictable(0)
+function lru_free(sz)
+    list = lru_evictable(sz)
     for id in list
         state = datastore[id]
         ref = DRef(myid(), id)
