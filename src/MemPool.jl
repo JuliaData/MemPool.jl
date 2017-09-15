@@ -3,6 +3,8 @@ __precompile__()
 module MemPool
 
 import Base: serialize, deserialize
+export DRef, FileRef, poolset, poolget, pooldelete, destroyonevict,
+       movetodisk, copytodisk, savetodisk, mmwrite, mmread
 
 ## Wrapping-unwrapping of payloads:
 

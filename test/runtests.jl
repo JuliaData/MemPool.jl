@@ -102,14 +102,15 @@ inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datas
     @test inmem(r3)
     poolget(r2) # make this less least recently used
 
+    destroyonevict(r3)
     r5 = poolset([1,2],2)
-    @test !inmem(r3)
+    @test_throws KeyError poolget(r3)
     @test inmem(r2)
 
     r6 = poolset([1,2],2)
     @test inmem(r2)
     @test inmem(r4)
 
-    map(poolget, [r1,r2,r3,r4,r5,r6]) == [[1:2;], [1:3;], [1:5;], [1], [1:2;], [1:2;]]
-    map(pooldelete, [r1,r2,r3,r4,r5,r6])
+    map(poolget, [r1,r2,r4,r5,r6]) == [[1:2;], [1:3;], [1], [1:2;], [1:2;]]
+    map(pooldelete, [r1,r2,r4,r5,r6])
 end

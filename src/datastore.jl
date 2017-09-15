@@ -1,17 +1,16 @@
 ## datastore
 
-export poolset, poolget, pooldelete, movetodisk, copytodisk, savetodisk
-
 struct DRef
     owner::Int
     id::Int
+    size::UInt
 end
 
 mutable struct RefState
     size::UInt64
     data::Nullable{Any}
     file::Nullable{String}
-    spilltodisk::Bool # if set to false, will be destroyed on eviction
+    destroyonevict::Bool # if true, will be removed from memory
 end
 
 isinmemory(x::RefState) = !isnull(x.data)
@@ -20,23 +19,33 @@ isondisk(x::RefState) = !isnull(x.file)
 const datastore = Dict{Int,RefState}()
 const id_counter = Ref(0)
 
-function poolset(x, pid=myid())
+function poolset(x, pid=myid(); size=approx_size(x), destroyonevict=false)
     if pid == myid()
         id = id_counter[] += 1
-        sz = approx_size(x)
-        lru_free(sz)
-        datastore[id] = RefState(sz,
+        lru_free(size)
+        datastore[id] = RefState(size,
                                  Nullable{Any}(x),
                                  Nullable{String}(),
-                                 true)
-        lru_touch(id, sz)
-        DRef(myid(), id)
+                                 destroyonevict)
+        lru_touch(id, size)
+        DRef(myid(), id, size)
     else
         # use our serialization
         remotecall_fetch(pid, MMWrap(x)) do wx
             # todo: try to evict here before deserializing...
             poolset(unwrap_payload(wx), pid)
         end
+    end
+end
+
+function forwardkeyerror(f)
+    try
+        f()
+    catch err
+        if isa(err, RemoteException) && isa(err.captured.ex, KeyError)
+            rethrow(err.captured.ex)
+        end
+        rethrow(err)
     end
 end
 
@@ -48,17 +57,10 @@ function poolget(r::DRef)
     if r.owner == myid()
         _getlocal(r.id, false)
     else
-        try
+        forwardkeyerror() do
             remotecall_fetch(r.owner, r) do r
                 MMWrap(_getlocal(r.id, true))
             end
-        catch err
-            if isa(err, RemoteException)
-                if isa(err.captured.ex, KeyError)
-                    rethrow(err.captured.ex)
-                end
-            end
-            rethrow(err)
         end
     end |> unwrap_payload
 end
@@ -103,6 +105,17 @@ function pooldelete(r::DRef)
     delete!(datastore, r.id)
     nothing
 end
+
+function destroyonevict(r::DRef, flag::Bool=true)
+    if r.owner == myid()
+        datastore[r.id].destroyonevict = flag
+    else
+        forwardkeyerror() do
+            remotecall_fetch(destroyonevict, r.owner, r, flag)
+        end
+    end
+end
+
 
 default_path(r::DRef) = ".mempool/$session-$(r.owner)/$(r.id)"
 
@@ -190,11 +203,11 @@ function lru_free(sz)
     list = lru_evictable(sz)
     for id in list
         state = datastore[id]
-        ref = DRef(myid(), id)
-        if state.spilltodisk
-            movetodisk(ref)
-        else
+        ref = DRef(myid(), id, sz)
+        if state.destroyonevict
             pooldelete(ref)
+        else
+            movetodisk(ref)
         end
     end
 end
