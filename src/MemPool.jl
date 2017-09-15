@@ -121,7 +121,6 @@ end
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file))
 
 include("util.jl")
-include("thirdparty.jl")
 include("datastore.jl")
 
 __init__() = global session = "sess-" * randstring(5)
