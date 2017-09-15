@@ -1,6 +1,8 @@
 # MemPool
 
-Distributed datastore that supports custom serialization, spilling least recently used data to disk and memory-mapping.
+[![Build Status](https://travis-ci.org/JuliaComputing/MemPool.jl.svg?branch=master)](https://travis-ci.org/JuliaComputing/MemPool.jl)
+
+Simple distributed datastore that supports custom serialization, spilling least recently used data to disk and memory-mapping.
 
 ## Usage
 
