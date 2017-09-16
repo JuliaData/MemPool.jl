@@ -35,6 +35,7 @@ end
 # the receiver process will simply read from file while unwrapping
 struct FileRef
     file::String
+    size::UInt
 end
 
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file))

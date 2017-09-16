@@ -69,7 +69,7 @@ function _getlocal(id, remote)
     state = datastore[id]
     if remote
         if isondisk(state)
-            return FileRef(get(state.file))
+            return FileRef(get(state.file), state.size)
         elseif isinmemory(state)
             lru_touch(id, state.size)
             return get(state.data)
@@ -83,8 +83,10 @@ function _getlocal(id, remote)
             # TODO: get memory mapped size and not count it as
             # much as local process size
             lru_free(state.size)
+            data = open(deserialize, get(state.file))
+            state.data = Nullable{Any}(data)
             lru_touch(id, state.size) # load back to memory
-            return unwrap_payload(FileRef(get(state.file)))
+            return data
         end
     end
     error("ref id $id not found in memory or on disk!")
@@ -127,7 +129,7 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     mkpath(dirname(path))
     if isfile(path)
         warn("$(r) is already on disk, skipping.")
-        return FileRef(path)
+        return FileRef(path, r.size)
     end
     open(path, "w") do io
         serialize(io, MMWrap(poolget(r)))
@@ -139,7 +141,7 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
         delete!(lru_order, r.id)
     end
 
-    return FileRef(path)
+    return FileRef(path, r.size)
 end
 
 copytodisk(r::DRef, path=default_path(r)) = movetodisk(r, true)
@@ -154,7 +156,7 @@ function savetodisk(r::DRef, path)
         open(path, "w") do io
             serialize(io, MMWrap(poolget(r)))
         end
-        return FileRef(path)
+        return FileRef(path, r.size)
     else
         return remotecall_fetch(savetodisk, r.owner, r, path)
     end
