@@ -113,4 +113,13 @@ inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datas
 
     map(poolget, [r1,r2,r4,r5,r6]) == [[1:2;], [1:3;], [1], [1:2;], [1:2;]]
     map(pooldelete, [r1,r2,r4,r5,r6])
+    @everywhere MemPool.max_memsize[] = 2e9
+end
+
+@testset "who_has_read" begin
+    f = tempname()
+    ref = poolset([1:5;])
+    fref = savetodisk(ref, f)
+    r2 = remotecall_fetch(()->MemPool.poolget(fref), 2)
+    @test MemPool.who_has_read[f][1].owner == 2
 end

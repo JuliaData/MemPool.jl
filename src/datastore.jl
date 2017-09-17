@@ -19,13 +19,13 @@ isondisk(x::RefState) = !isnull(x.file)
 const datastore = Dict{Int,RefState}()
 const id_counter = Ref(0)
 
-function poolset(x, pid=myid(); size=approx_size(x), destroyonevict=false)
+function poolset(x, pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
     if pid == myid()
         id = id_counter[] += 1
         lru_free(size)
         datastore[id] = RefState(size,
                                  Nullable{Any}(x),
-                                 Nullable{String}(),
+                                 Nullable{String}(file),
                                  destroyonevict)
         lru_touch(id, size)
         DRef(myid(), id, size)
@@ -49,8 +49,32 @@ function forwardkeyerror(f)
     end
 end
 
+const file_to_dref = Dict{String, DRef}()
+const who_has_read = Dict{String, Vector{DRef}}() # updated only on master process
+
 function poolget(r::FileRef)
-    unwrap_payload(r)
+    # since loading a file is expensive, and often
+    # requested in quick succession
+    # we add the data to the pool
+    if haskey(file_to_dref, r.file)
+        ref = file_to_dref[r.file]
+        if ref.owner == myid()
+            return poolget(ref)
+        end
+    end
+
+    x = unwrap_payload(open(deserialize, r.file))
+    dref = poolset(x, file=r.file, size=r.size)
+    file_to_dref[r.file] = dref
+    remotecall_fetch(1, dref) do dr
+        who_has = MemPool.who_has_read
+        if !haskey(who_has, r.file)
+            who_has[r.file] = DRef[]
+        end
+        push!(who_has[r.file], dr)
+        nothing
+    end
+    return x
 end
 
 function poolget(r::DRef)
@@ -83,7 +107,7 @@ function _getlocal(id, remote)
             # TODO: get memory mapped size and not count it as
             # much as local process size
             lru_free(state.size)
-            data = open(deserialize, get(state.file))
+            data = unwrap_payload(open(deserialize, get(state.file)))
             state.data = Nullable{Any}(data)
             lru_touch(id, state.size) # load back to memory
             return data
@@ -136,12 +160,13 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     end
     s = datastore[r.id]
     s.file = Nullable(path)
+    fref = FileRef(path, r.size)
     if !keepinmemory
         s.data = Nullable{Any}()
         delete!(lru_order, r.id)
     end
 
-    return FileRef(path, r.size)
+    return fref
 end
 
 copytodisk(r::DRef, path=default_path(r)) = movetodisk(r, true)
