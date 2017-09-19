@@ -30,6 +30,9 @@ function mmread(::Type{A}, io, mmap) where A<:Union{Array,BitArray}
     T = eltype(A)
     if isbits(T)
         sz = deserialize(io)
+        if prod(sz) == 0
+            return A(sz...)
+        end
         if mmap
             data = Mmap.mmap(io.io, A, sz, position(io.io))
             seek(io.io, position(io.io)+sizeof(data)) # move
