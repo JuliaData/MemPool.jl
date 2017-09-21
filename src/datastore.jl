@@ -225,6 +225,8 @@ function lru_evictable(required=0)
     return evictable
 end
 
+const spilltodisk = Ref(false)
+
 function lru_free(sz)
     list = lru_evictable(sz)
     for id in list
@@ -233,6 +235,7 @@ function lru_free(sz)
         if state.destroyonevict
             pooldelete(ref)
         else
+            !spilltodisk[] && return
             movetodisk(ref)
         end
     end
