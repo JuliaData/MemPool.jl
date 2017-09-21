@@ -168,7 +168,7 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     return fref
 end
 
-copytodisk(r::DRef, path=default_path(r)) = movetodisk(r, true)
+copytodisk(r::DRef, path=default_path(r)) = movetodisk(r, path, true)
 
 """
 Allow users to specifically save something to disk.
