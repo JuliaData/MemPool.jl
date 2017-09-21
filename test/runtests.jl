@@ -88,6 +88,7 @@ end
 inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datastore[id]), ref.owner, ref.id)
 @testset "lru free" begin
     @everywhere MemPool.max_memsize[] = 8*10
+    @everywhere MemPool.spilltodisk[] = true
     r1 = poolset([1,2], 2)
     r2 = poolset([1,2,3], 2)
     r3 = poolset([1,2,3,4,5], 2)
