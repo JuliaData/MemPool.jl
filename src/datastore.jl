@@ -152,7 +152,6 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
 
     mkpath(dirname(path))
     if isfile(path)
-        warn("$(r) is already on disk, skipping.")
         return FileRef(path, r.size)
     end
     open(path, "w") do io
