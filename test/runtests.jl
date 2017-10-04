@@ -25,6 +25,17 @@ end
     @test length(y) == 10
 end
 
+using StaticArrays
+@testset "StaticArrays" begin
+    x = [@MVector(rand(75)) for i=1:100]
+    io = IOBuffer()
+    mmwrite(SerializationState(io), x)
+    alloc = @allocated mmwrite(SerializationState(seekstart(io)), x)
+
+    @test deserialize(seekstart(io)) == x
+    @test MemPool.approx_size(x) == 75*100*8
+end
+
 @testset "Array{String}" begin
     roundtrip([randstring(rand(1:10)) for i=4])
 end

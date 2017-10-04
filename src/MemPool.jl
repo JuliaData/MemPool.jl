@@ -40,6 +40,9 @@ end
 
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file))
 
+include("io.jl")
+include("datastore.jl")
+
 """
 `approx_size(d)`
 
@@ -50,10 +53,13 @@ function approx_size(d)
 end
 
 function approx_size{T}(d::Array{T})
-    if isbits(T)
-        sizeof(d)
+    isbits(T) && return sizeof(d)
+
+    fl = fixedlength(T)
+    if fl > 0
+        return length(d) * fl
     else
-        Base.summarysize(d)
+        return Base.summarysize(d)
     end
 end
 
@@ -62,9 +68,6 @@ function approx_size(xs::Array{String})
     # really super fast in comparison to summarysize
     sum(map(sizeof, xs)) + 4 * length(xs)
 end
-
-include("io.jl")
-include("datastore.jl")
 
 __init__() = global session = "sess-" * randstring(5)
 
