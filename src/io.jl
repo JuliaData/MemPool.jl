@@ -132,8 +132,8 @@ function fixedlength(t::Type, cycles=ObjectIdDict())
     end
 end
 
-fixedlength(t::Type{<:String}) = -1
-fixedlength(t::Type{<:Ptr}) = -1
+fixedlength(t::Type{<:String}, cycles=nothing) = -1
+fixedlength(t::Type{<:Ptr}, cycles=nothing) = -1
 
 function gen_writer{T}(::Type{T}, expr)
     @assert fixedlength(T) >= 0 "gen_writer must be called for fixed length eltypes"

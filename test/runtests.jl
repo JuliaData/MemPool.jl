@@ -23,6 +23,7 @@ end
     y = deserialize(seekstart(io))
     @test typeof(y) == Array{Union{},1}
     @test length(y) == 10
+    @test MemPool.fixedlength(Tuple{String, Int}) == -1
 end
 
 using StaticArrays
