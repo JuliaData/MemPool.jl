@@ -231,11 +231,11 @@ function lru_free(sz)
     list = lru_evictable(sz)
     for id in list
         state = datastore[id]
-        ref = DRef(myid(), id, sz)
+        ref = DRef(myid(), id, state.size)
         if state.destroyonevict
             pooldelete(ref)
         else
-            !spilltodisk[] && return
+            !spilltodisk[] && continue
             movetodisk(ref)
         end
     end
