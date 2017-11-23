@@ -51,6 +51,7 @@ end
 
 const file_to_dref = Dict{String, DRef}()
 const who_has_read = Dict{String, Vector{DRef}}() # updated only on master process
+const enable_who_has_read = Ref(true)
 
 function poolget(r::FileRef)
     # since loading a file is expensive, and often
@@ -66,13 +67,15 @@ function poolget(r::FileRef)
     x = unwrap_payload(open(deserialize, r.file))
     dref = poolset(x, file=r.file, size=r.size)
     file_to_dref[r.file] = dref
-    remotecall_fetch(1, dref) do dr
-        who_has = MemPool.who_has_read
-        if !haskey(who_has, r.file)
-            who_has[r.file] = DRef[]
+    if enable_who_has_read[]
+        remotecall_fetch(1, dref) do dr
+            who_has = MemPool.who_has_read
+            if !haskey(who_has, r.file)
+                who_has[r.file] = DRef[]
+            end
+            push!(who_has[r.file], dr)
+            nothing
         end
-        push!(who_has[r.file], dr)
-        nothing
     end
     return x
 end
@@ -116,19 +119,38 @@ function _getlocal(id, remote)
     error("ref id $id not found in memory or on disk!")
 end
 
+function datastore_delete(id)
+    state = datastore[id]
+    if isondisk(state)
+        f = get(state.file)
+        isfile(f) && rm(f)
+    end
+    # release
+    state.data = Nullable{Any}()
+    delete!(lru_order, id)
+    delete!(datastore, id)
+    # TODO: maybe cleanup from the who_has_read list?
+    nothing
+end
+
+function cleanup()
+    map(datastore_delete, collect(keys(datastore)))
+    d = default_dir(myid())
+    isdir(d) && rm(d; recursive=true)
+    nothing
+end
+
 function pooldelete(r::DRef)
     if r.owner != myid()
         return remotecall_fetch(pooldelete, r.owner, r)
     end
+    datastore_delete(r.id)
+end
 
-    state = datastore[r.id]
-    if isondisk(state)
-        rm(get(state.file))
-    end
-    # release
-    state.data = Nullable{Any}()
-    delete!(lru_order, r.id)
-    delete!(datastore, r.id)
+function pooldelete(r::FileRef)
+    isfile(r.file) && rm(r.file)
+    (r.file in keys(file_to_dref)) && delete!(file_to_dref, r.file)
+    # TODO: maybe cleanup from the who_has_read list?
     nothing
 end
 
@@ -143,10 +165,12 @@ function destroyonevict(r::DRef, flag::Bool=true)
 end
 
 
-default_path(r::DRef) = ".mempool/$session-$(r.owner)/$(r.id)"
+default_dir(p) = joinpath(".mempool", "$session-$p")
+default_path(r::DRef) = joinpath(default_dir(r.owner), string(r.id))
 
 function movetodisk(r::DRef, path=default_path(r), keepinmemory=false) 
     if r.owner != myid()
+        info("owner: $(r.owner) != $(myid())")
         return remotecall_fetch(movetodisk, r.owner, r, path)
     end
 
@@ -183,6 +207,14 @@ function savetodisk(r::DRef, path)
         return FileRef(path, r.size)
     else
         return remotecall_fetch(savetodisk, r.owner, r, path)
+    end
+end
+
+function deletefromdisk(r::DRef, path)
+    if r.owner == myid()
+        return rm(path)
+    else
+        return remotecall_fetch(deletefromdisk, r.owner, r, path)
     end
 end
 
