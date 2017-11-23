@@ -136,3 +136,9 @@ end
     r2 = remotecall_fetch(()->MemPool.poolget(fref), 2)
     @test MemPool.who_has_read[f][1].owner == 2
 end
+
+@testset "cleanup" begin
+    @everywhere MemPool.cleanup()
+    d = MemPool.default_dir(myid())
+    @test !isdir(d)
+end

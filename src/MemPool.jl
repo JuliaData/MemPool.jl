@@ -4,7 +4,8 @@ module MemPool
 
 import Base: serialize, deserialize
 export DRef, FileRef, poolset, poolget, pooldelete, destroyonevict,
-       movetodisk, copytodisk, savetodisk, mmwrite, mmread
+       movetodisk, copytodisk, savetodisk, mmwrite, mmread, cleanup,
+       deletefromdisk
 
 ## Wrapping-unwrapping of payloads:
 
