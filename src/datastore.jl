@@ -170,7 +170,6 @@ default_path(r::DRef) = joinpath(default_dir(r.owner), string(r.id))
 
 function movetodisk(r::DRef, path=default_path(r), keepinmemory=false) 
     if r.owner != myid()
-        info("owner: $(r.owner) != $(myid())")
         return remotecall_fetch(movetodisk, r.owner, r, path)
     end
 
