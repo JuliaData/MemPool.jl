@@ -123,7 +123,7 @@ function datastore_delete(id)
     state = datastore[id]
     if isondisk(state)
         f = get(state.file)
-        isfile(f) && rm(f)
+        isfile(f) && rm(f; force=true)
     end
     # release
     state.data = Nullable{Any}()
