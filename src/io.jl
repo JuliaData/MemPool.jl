@@ -18,7 +18,7 @@ function mmwrite(io::AbstractSerializer, arr::A) where A<:Union{Array,BitArray}
     Base.serialize_type(io, MMSer{typeof(arr)})
     if isbits(T)
         serialize(io, size(arr))
-        write(io.io, arr)
+        write(io.io, reinterpret(UInt8, arr))
         return
     elseif T<:Union{} || T<:Nullable{Union{}}
         serialize(io, size(arr))
@@ -143,6 +143,8 @@ function gen_writer{T}(::Type{T}, expr)
         :(begin
               $([gen_writer(fieldtype(T, i), :(getfield($expr, $i))) for i=1:nfields(T)]...)
           end)
+    elseif isbits(T) && sizeof(T) == 0
+        return :(begin end)
     elseif isbits(T)
         return :(write(io, $expr))
     else
@@ -156,6 +158,8 @@ function gen_reader{T}(::Type{T})
         :(read(io, Ref{$T}())[])
     elseif length(T.types) > 0
         return :(ccall(:jl_new_struct, Any, (Any,Any...), $T, $([gen_reader(fieldtype(T, i)) for i=1:nfields(T)]...)))
+    elseif isbits(T) && sizeof(T) == 0
+        return :(ccall(:jl_new_struct, Any, (Any,Any...), $T))
     elseif isbits(T)
         return :(read(io, $T))
     else
