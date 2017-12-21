@@ -64,7 +64,7 @@ function poolget(r::FileRef)
         end
     end
 
-    x = unwrap_payload(open(deserialize, r.file))
+    x = unwrap_payload(open(deserialize, r.file, "r+"))
     dref = poolset(x, file=r.file, size=r.size)
     file_to_dref[r.file] = dref
     if enable_who_has_read[]
