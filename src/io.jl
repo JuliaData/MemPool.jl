@@ -18,7 +18,11 @@ function mmwrite(io::AbstractSerializer, arr::A) where A<:Union{Array,BitArray}
     Base.serialize_type(io, MMSer{typeof(arr)})
     if isbits(T)
         serialize(io, size(arr))
-        write(io.io, reinterpret(UInt8, arr))
+        if arr isa BitArray
+            write(io.io, arr)
+        else
+            write(io.io, reinterpret(UInt8, arr))
+        end
         return
     elseif T<:Union{} || T<:Nullable{Union{}}
         serialize(io, size(arr))
