@@ -38,7 +38,14 @@ using StaticArrays
 end
 
 @testset "Array{String}" begin
-    roundtrip([randstring(rand(1:10)) for i=4])
+    roundtrip([randstring(rand(1:10)) for i=1:4])
+end
+
+mutable struct Empty
+end
+
+@testset "Array{Empty}" begin
+    roundtrip([Empty() for i=1:4])
 end
 
 @testset "lru" begin

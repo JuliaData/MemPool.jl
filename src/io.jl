@@ -21,7 +21,7 @@ function mmwrite(io::AbstractSerializer, arr::A) where A<:Union{Array,BitArray}
         if arr isa BitArray
             write(io.io, arr)
         else
-            write(io.io, reinterpret(UInt8, arr))
+            write(io.io, reinterpret(UInt8, reshape(arr, (length(arr),))))
         end
         return
     elseif T<:Union{} || T<:Nullable{Union{}}
