@@ -53,6 +53,10 @@ function approx_size(d)
     Base.summarysize(d) # note: this is accurate but expensive
 end
 
+function approx_size(d::Union{Base.BitInteger, Float16, Float32, Float64})
+    sizeof(d)
+end
+
 function approx_size{T}(d::Array{T})
     isbits(T) && return sizeof(d)
 
@@ -60,7 +64,7 @@ function approx_size{T}(d::Array{T})
     if fl > 0
         return length(d) * fl
     else
-        return Base.summarysize(d)
+        return isempty(d) ? 0 : sum(approx_size(x) for x in d)
     end
 end
 
