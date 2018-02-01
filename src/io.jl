@@ -137,12 +137,8 @@ fixedlength(t::Type{<:Ptr}, cycles=nothing) = -1
 
 function gen_writer{T}(::Type{T}, expr)
     @assert fixedlength(T) >= 0 "gen_writer must be called for fixed length eltypes"
-    if T<:Tuple
-        if isbits(T)
-            :(write(io, Ref{$T}($expr)))
-        else
-            :(Base.@nexprs $(nfields(T)) i->fast_write(io, $expr[i]))
-        end
+    if T<:Tuple && isbits(T)
+        :(write(io, Ref{$T}($expr)))
     elseif length(T.types) > 0
         :(begin
               $([gen_writer(fieldtype(T, i), :(getfield($expr, $i))) for i=1:nfields(T)]...)
