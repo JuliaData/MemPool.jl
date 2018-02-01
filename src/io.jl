@@ -160,11 +160,10 @@ function gen_reader{T}(::Type{T})
     @assert fixedlength(T) >= 0 "gen_reader must be called for fixed length eltypes"
     ex = if T<:Tuple
         if isbits(T)
-            :(read(io, Ref{$T}())[])
+            return :(read(io, Ref{$T}())[])
         else
-            :(begin
-                  ($([:(fast_read(io, $S)) for S in T.parameters]...))
-            end)
+            exprs = [gen_reader(fieldtype(T, i)) for i=1:nfields(T)]
+            return :(tuple($(exprs...)))
         end
     elseif length(T.types) > 0
         return :(ccall(:jl_new_struct, Any, (Any,Any...), $T, $([gen_reader(fieldtype(T, i)) for i=1:nfields(T)]...)))
