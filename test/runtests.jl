@@ -46,6 +46,7 @@ end
 
 @testset "Array{Empty}" begin
     roundtrip([Empty() for i=1:4])
+    roundtrip([(Empty(),) for i=1:4])
 end
 
 @testset "lru" begin

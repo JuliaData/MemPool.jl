@@ -138,7 +138,11 @@ fixedlength(t::Type{<:Ptr}, cycles=nothing) = -1
 function gen_writer{T}(::Type{T}, expr)
     @assert fixedlength(T) >= 0 "gen_writer must be called for fixed length eltypes"
     if T<:Tuple
-        :(write(io, Ref{$T}($expr)))
+        if isbits(T)
+            :(write(io, Ref{$T}($expr)))
+        else
+            :(Base.@nexprs $(nfields(T)) i->fast_write(io, $expr[i]))
+        end
     elseif length(T.types) > 0
         :(begin
               $([gen_writer(fieldtype(T, i), :(getfield($expr, $i))) for i=1:nfields(T)]...)
@@ -154,17 +158,24 @@ end
 
 function gen_reader{T}(::Type{T})
     @assert fixedlength(T) >= 0 "gen_reader must be called for fixed length eltypes"
-    if T<:Tuple
-        :(read(io, Ref{$T}())[])
+    ex = if T<:Tuple
+        if isbits(T)
+            :(read(io, Ref{$T}())[])
+        else
+            :(begin
+                  ($([:(fast_read(io, $S)) for S in T.parameters]...))
+            end)
+        end
     elseif length(T.types) > 0
         return :(ccall(:jl_new_struct, Any, (Any,Any...), $T, $([gen_reader(fieldtype(T, i)) for i=1:nfields(T)]...)))
     elseif isbits(T) && sizeof(T) == 0
         return :(ccall(:jl_new_struct, Any, (Any,Any...), $T))
     elseif isbits(T)
-        return :(read(io, $T))
+        return :($T; read(io, $T))
     else
         error("Don't know how to deserialize $T")
     end
+    return :($T; $ex)
 end
 
 @generated function fast_write(io, x)
