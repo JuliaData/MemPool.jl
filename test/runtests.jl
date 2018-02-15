@@ -95,6 +95,7 @@ end
     ref = poolset([1,2], 2)
     fref = movetodisk(ref)
     @test isa(fref, MemPool.FileRef)
+    @test fref.host == getipaddr()
     @test poolget(fref) == poolget(ref)
     f = tempname()
     fref2 = savetodisk(ref, f)
