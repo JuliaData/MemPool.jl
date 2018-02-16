@@ -35,8 +35,13 @@ end
 # This allows communicating only the file name across processors,
 # the receiver process will simply read from file while unwrapping
 struct FileRef
+    host::IPAddr
     file::String
     size::UInt
+
+    function FileRef(file, size)
+        new(host, file, size)
+    end
 end
 
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file))
@@ -74,6 +79,9 @@ function approx_size(xs::Array{String})
     sum(map(sizeof, xs)) + 4 * length(xs)
 end
 
-__init__() = global session = "sess-" * randstring(5)
+function __init__()
+    global session = "sess-" * randstring(5)
+    global host = getipaddr()
+end
 
 end # module
