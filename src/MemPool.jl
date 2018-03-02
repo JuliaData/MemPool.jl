@@ -44,7 +44,7 @@ struct FileRef
     end
 end
 
-unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file))
+unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file, "r+"))
 
 include("io.jl")
 include("datastore.jl")
