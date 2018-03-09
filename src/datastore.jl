@@ -53,6 +53,15 @@ const file_to_dref = Dict{String, DRef}()
 const who_has_read = Dict{String, Vector{DRef}}() # updated only on master process
 const enable_who_has_read = Ref(true)
 
+is_my_ip(ip) = getipaddr() == IPv4(ip)
+function get_worker_at(ip)
+    for wrkr in Base.Distributed.PGRP.workers
+        (IPv4(wrkr.bind_addr) == IPv4(ip)) && (return wrkr.id)
+    end
+    error("no worker at $ip")
+end
+
+
 function poolget(r::FileRef)
     # since loading a file is expensive, and often
     # requested in quick succession
@@ -64,7 +73,13 @@ function poolget(r::FileRef)
         end
     end
 
-    x = unwrap_payload(open(deserialize, r.file, "r+"))
+    if is_my_ip(r.host)
+        x = unwrap_payload(open(deserialize, r.file, "r+"))
+    else
+        x = remotecall_fetch(get_worker_at(ip), r.file) do file
+            unwrap_payload(open(deserialize, file, "r+"))
+        end
+    end
     dref = poolset(x, file=r.file, size=r.size)
     file_to_dref[r.file] = dref
     if enable_who_has_read[]
