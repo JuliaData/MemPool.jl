@@ -125,7 +125,7 @@ function _getlocal(id, remote)
             # TODO: get memory mapped size and not count it as
             # much as local process size
             lru_free(state.size)
-            data = unwrap_payload(open(deserialize, get(state.file)))
+            data = unwrap_payload(open(deserialize, get(state.file), "r+"))
             state.data = Nullable{Any}(data)
             lru_touch(id, state.size) # load back to memory
             return data

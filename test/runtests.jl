@@ -1,5 +1,7 @@
+include("testenv.jl")
+
 if nprocs() == 1
-    addprocs(1)
+    addprocs_with_testenv(1)
 end
 
 using MemPool
