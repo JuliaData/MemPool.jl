@@ -52,15 +52,13 @@ end
 const file_to_dref = Dict{String, DRef}()
 const who_has_read = Dict{String, Vector{DRef}}() # updated only on master process
 const enable_who_has_read = Ref(true)
+const enable_random_fref_serve = Ref(true)
 
 is_my_ip(ip) = getipaddr() == IPv4(ip)
 function get_worker_at(ip)
-    for wrkr in Base.Distributed.PGRP.workers
-        (IPv4(wrkr.bind_addr) == IPv4(ip)) && (return wrkr.id)
-    end
-    error("no worker at $ip")
+    wrkrids = [w.id for w in filter((w)->IPv4(isa(w, Base.Distributed.Worker) ? get(w.config.bind_addr) : w.bind_addr) == IPv4(ip), Base.Distributed.PGRP.workers)]
+    enable_random_fref_serve[] ? wrkrids[rand(1:length(wrkrids))] : minimum(wrkrids)
 end
-
 
 function poolget(r::FileRef)
     # since loading a file is expensive, and often
