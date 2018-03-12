@@ -104,6 +104,10 @@ end
     pooldelete(ref)
     @test fetch(@spawnat 2 isempty(MemPool.lru_order))
     @test fetch(@spawnat 2 isempty(MemPool.datastore))
+    @test MemPool.get_worker_at(getipaddr()) == 1
+    @test MemPool.get_worker_at("127.0.0.1") in [1,2]
+    @test MemPool.is_my_ip(getipaddr())
+    @test !MemPool.is_my_ip("127.0.0.1")
 end
 
 inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datastore[id]), ref.owner, ref.id)
