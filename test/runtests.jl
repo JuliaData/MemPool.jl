@@ -41,6 +41,13 @@ end
 
 @testset "Array{String}" begin
     roundtrip([randstring(rand(1:10)) for i=1:4])
+    sa = Array{String}(2)
+    sa[1] = "foo"
+    io = IOBuffer()
+    mmwrite(SerializationState(io), sa)
+    sa2 = deserialize(seekstart(io))
+    @test sa2[1] == "foo"
+    @test !isassigned(sa2, 2)
 end
 
 mutable struct Empty
