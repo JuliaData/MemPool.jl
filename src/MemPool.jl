@@ -62,18 +62,31 @@ function approx_size(d::Union{Base.BitInteger, Float16, Float32, Float64})
     sizeof(d)
 end
 
-function approx_size{T}(d::Array{T})
-    isbits(T) && return sizeof(d)
+function approx_size{K,V}(d::Associative{K,V})
+    N = length(d)
+    ksz = approx_size(K, N, keys(d))
+    vsz = approx_size(V, N, values(d))
+    ksz + vsz + 8*N
+end
 
+function approx_size{T}(d::AbstractArray{T})
+    isempty(d) && return 0
+    isbits(T) && return sizeof(d)
+    approx_size(T, length(d), d)
+end
+
+function approx_size(T, L, d)
     fl = fixedlength(T)
     if fl > 0
-        return length(d) * fl
+        return L * fl
+    elseif T === Any
+        return L * 64  # approximation (override with a more specific method where exact calculation is needed)
     else
-        return isempty(d) ? 0 : sum(approx_size(x) for x in d)
+        return sum(approx_size(x) for x in d)
     end
 end
 
-function approx_size(xs::Array{String})
+function approx_size(xs::AbstractArray{String})
     # doesn't check for redundant references, but
     # really super fast in comparison to summarysize
     sum(map(sizeof, xs)) + 4 * length(xs)
