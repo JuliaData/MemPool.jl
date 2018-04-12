@@ -144,6 +144,7 @@ function fixedlength(t::Type, cycles=ObjectIdDict())
 end
 
 fixedlength(t::Type{<:String}, cycles=nothing) = -1
+fixedlength(t::Type{Union{}}, cycles=nothing) = -1
 fixedlength(t::Type{<:Ptr}, cycles=nothing) = -1
 
 function gen_writer{T}(::Type{T}, expr)
