@@ -9,9 +9,9 @@ export DRef, FileRef, poolset, poolget, pooldelete, destroyonevict,
 
 ## Wrapping-unwrapping of payloads:
 
-immutable MMWrap{T} # wrap an object to use custom
-                    # memory-mapping/fast serializer
-    x::T
+immutable MMWrap # wrap an object to use custom
+                 # memory-mapping/fast serializer
+    x::Any
 end
 
 # Wrapping is an implementation detail unwrap_payload will be called by poolget
@@ -26,7 +26,7 @@ function serialize(io::AbstractSerializer, w::MMWrap)
     mmwrite(io, w.x)
 end
 
-function deserialize{T}(io::AbstractSerializer, ::Type{MMWrap{T}})
+function deserialize(io::AbstractSerializer, ::Type{MMWrap})
     MMWrap(mmread(T, io)) # gotta keep that wrapper on
 end
 

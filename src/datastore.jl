@@ -19,7 +19,7 @@ isondisk(x::RefState) = !isnull(x.file)
 const datastore = Dict{Int,RefState}()
 const id_counter = Ref(0)
 
-function poolset(x, pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
+function poolset(x::ANY, pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
     if pid == myid()
         id = id_counter[] += 1
         lru_free(size)
