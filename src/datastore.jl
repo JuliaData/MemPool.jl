@@ -53,11 +53,31 @@ const file_to_dref = Dict{String, DRef}()
 const who_has_read = Dict{String, Vector{DRef}}() # updated only on master process
 const enable_who_has_read = Ref(true)
 const enable_random_fref_serve = Ref(true)
+const wrkrips = Dict{IPv4,Vector{Int}}() # cached IP-pid map to lookup FileRef locations
 
 is_my_ip(ip) = getipaddr() == IPv4(ip)
-function get_worker_at(ip)
-    wrkrids = [w.id for w in filter((w)->IPv4(isa(w, Base.Distributed.Worker) ? get(w.config.bind_addr) : w.bind_addr) == IPv4(ip), Base.Distributed.PGRP.workers)]
-    enable_random_fref_serve[] ? wrkrids[rand(1:length(wrkrids))] : minimum(wrkrids)
+
+function get_wrkrips()
+    d = Dict{IPv4,Vector{Int}}()
+    for w in Base.Distributed.PGRP.workers
+        wip = IPv4(isa(w, Base.Distributed.Worker) ? get(w.config.bind_addr) : w.bind_addr)
+        if wip in keys(d)
+            if enable_random_fref_serve[]
+                push!(d[wip], w.id)
+            else
+                d[wip] = [min(d[wip][1], w.id)]
+            end
+        else
+            d[wip] = [w.id]
+        end
+    end
+    d
+end
+
+get_worker_at(ip::String) = get_worker_at(IPv4(ip))
+function get_worker_at(ip::IPv4)
+    isempty(wrkrips) && merge!(wrkrips, remotecall_fetch(get_wrkrips, 1))
+    rand(wrkrips[ip]) # rand is equivalent to first when length(wrkrids) == 1
 end
 
 function poolget(r::FileRef)
@@ -74,7 +94,7 @@ function poolget(r::FileRef)
     if is_my_ip(r.host)
         x = unwrap_payload(open(deserialize, r.file, "r+"))
     else
-        x = remotecall_fetch(get_worker_at(ip), r.file) do file
+        x = remotecall_fetch(get_worker_at(r.host), r.file) do file
             unwrap_payload(open(deserialize, file, "r+"))
         end
     end
@@ -133,6 +153,7 @@ function _getlocal(id, remote)
 end
 
 function datastore_delete(id)
+    (id in keys(datastore)) || (return nothing)
     state = datastore[id]
     if isondisk(state)
         f = get(state.file)
@@ -147,6 +168,8 @@ function datastore_delete(id)
 end
 
 function cleanup()
+    empty!(file_to_dref)
+    empty!(who_has_read)
     map(datastore_delete, collect(keys(datastore)))
     d = default_dir(myid())
     isdir(d) && rm(d; recursive=true)
