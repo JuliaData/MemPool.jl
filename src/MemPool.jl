@@ -54,7 +54,7 @@ include("datastore.jl")
 
 Returns the size of `d` in bytes used for accounting in MemPool datastore.
 """
-function approx_size(d)
+function approx_size(d::ANY)
     Base.summarysize(d) # note: this is accurate but expensive
 end
 
@@ -89,7 +89,11 @@ end
 function approx_size(xs::AbstractArray{String})
     # doesn't check for redundant references, but
     # really super fast in comparison to summarysize
-    sum(map(sizeof, xs)) + 4 * length(xs)
+    s = 0
+    for x in xs
+        s += sizeof(x)
+    end
+    s + 4 * length(xs)
 end
 
 function __init__()
