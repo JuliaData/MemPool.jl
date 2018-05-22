@@ -81,6 +81,8 @@ function approx_size(T, L, d)
         return L * fl
     elseif T === Any
         return L * 64  # approximation (override with a more specific method where exact calculation is needed)
+    elseif isempty(d)
+        return 0
     else
         return sum(approx_size(x) for x in d)
     end
