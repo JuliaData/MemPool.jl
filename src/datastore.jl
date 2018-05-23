@@ -71,6 +71,18 @@ function get_wrkrips()
             d[wip] = [w.id]
         end
     end
+
+    loopback = ip"127.0.0.1"
+    if (loopback in keys(d)) && (length(d) > 1)
+        # there is a chance that workers on loopback are actually on same ip as master
+        realip = remotecall_fetch(getipaddr, first(d[loopback]))
+        if realip in keys(d)
+            append!(d[realip], d[loopback])
+        else
+            d[realip] = d[loopback]
+        end
+        delete!(d, loopback)
+    end
     d
 end
 
