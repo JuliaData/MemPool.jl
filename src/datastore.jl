@@ -87,9 +87,11 @@ function get_wrkrips()
 end
 
 get_worker_at(ip::String) = get_worker_at(IPv4(ip))
-function get_worker_at(ip::IPv4)
+get_worker_at(ip::IPv4) = rand(get_workers_at(ip))
+
+function get_workers_at(ip::IPv4)
     isempty(wrkrips) && merge!(wrkrips, remotecall_fetch(get_wrkrips, 1))
-    rand(wrkrips[ip]) # rand is equivalent to first when length(wrkrids) == 1
+    wrkrips[ip]
 end
 
 function poolget(r::FileRef)
