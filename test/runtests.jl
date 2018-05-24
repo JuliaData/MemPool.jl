@@ -119,14 +119,10 @@ end
     @test remotecall_fetch(poolget, 2, fref) == poolget(ref)
     @everywhere MemPool.cleanup()
 
-    @test MemPool.get_worker_at(getipaddr()) == 1
-    @test MemPool.get_worker_at("127.0.0.1") in [1,2,3]
-    @test remotecall_fetch(()->MemPool.get_worker_at("127.0.0.1"), 2) in [1,2,3]
-    all_workers_at_localhost = MemPool.wrkrips[ip"127.0.0.1"]
+    @test MemPool.get_worker_at(getipaddr()) in [1,2,3]
+    @test remotecall_fetch(()->MemPool.get_worker_at(getipaddr()), 2) in [1,2,3]
     @everywhere MemPool.enable_random_fref_serve[] = false
     @everywhere empty!(MemPool.wrkrips)
-    @test MemPool.get_worker_at("127.0.0.1") == minimum(all_workers_at_localhost)
-    @test length(MemPool.wrkrips[ip"127.0.0.1"]) == 1
     @test MemPool.is_my_ip(getipaddr())
     @test !MemPool.is_my_ip("127.0.0.1")
 end
