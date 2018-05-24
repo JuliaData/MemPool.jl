@@ -59,7 +59,11 @@ is_my_ip(ip) = getipaddr() == IPv4(ip)
 
 function get_wrkrips()
     d = Dict{IPv4,Vector{Int}}()
-    for w in Base.Distributed.PGRP.workers
+    ws = Base.Distributed.PGRP.workers
+    for w in ws
+        if w.id == 1 && length(ws) > 1
+            continue
+        end
         wip = IPv4(isa(w, Base.Distributed.Worker) ? get(w.config.bind_addr) : w.bind_addr)
         if wip in keys(d)
             if enable_random_fref_serve[]
