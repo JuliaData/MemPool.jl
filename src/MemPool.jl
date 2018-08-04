@@ -2,14 +2,15 @@ __precompile__()
 
 module MemPool
 
-import Base: serialize, deserialize
+using Serialization, Sockets, Random
+import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, pooldelete, destroyonevict,
        movetodisk, copytodisk, savetodisk, mmwrite, mmread, cleanup,
        deletefromdisk
 
 ## Wrapping-unwrapping of payloads:
 
-immutable MMWrap # wrap an object to use custom
+struct MMWrap # wrap an object to use custom
                  # memory-mapping/fast serializer
     x::Any
 end
@@ -54,7 +55,7 @@ include("datastore.jl")
 
 Returns the size of `d` in bytes used for accounting in MemPool datastore.
 """
-function approx_size(d::ANY)
+function approx_size(@nospecialize(d))
     Base.summarysize(d) # note: this is accurate but expensive
 end
 
@@ -62,14 +63,14 @@ function approx_size(d::Union{Base.BitInteger, Float16, Float32, Float64})
     sizeof(d)
 end
 
-function approx_size{K,V}(d::Associative{K,V})
+function approx_size(d::AbstractDict{K,V}) where {K,V}
     N = length(d)
     ksz = approx_size(K, N, keys(d))
     vsz = approx_size(V, N, values(d))
     ksz + vsz + 8*N
 end
 
-function approx_size{T}(d::AbstractArray{T})
+function approx_size(d::AbstractArray{T}) where T
     isempty(d) && return 0
     isbits(T) && return sizeof(d)
     approx_size(T, length(d), d)

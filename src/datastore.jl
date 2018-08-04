@@ -1,4 +1,5 @@
 ## datastore
+using Distributed
 
 struct DRef
     owner::Int
@@ -8,24 +9,24 @@ end
 
 mutable struct RefState
     size::UInt64
-    data::Nullable{Any}
-    file::Nullable{String}
+    data::Union{Some{Any}, Nothing}
+    file::Union{String, Nothing}
     destroyonevict::Bool # if true, will be removed from memory
 end
 
-isinmemory(x::RefState) = !isnull(x.data)
-isondisk(x::RefState) = !isnull(x.file)
+isinmemory(x::RefState) = x.data !== nothing
+isondisk(x::RefState) = x.file !== nothing
 
 const datastore = Dict{Int,RefState}()
 const id_counter = Ref(0)
 
-function poolset(x::ANY, pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
+function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
     if pid == myid()
         id = id_counter[] += 1
         lru_free(size)
         datastore[id] = RefState(size,
-                                 Nullable{Any}(x),
-                                 Nullable{String}(file),
+                                 Some{Any}(x),
+                                 file,
                                  destroyonevict)
         lru_touch(id, size)
         DRef(myid(), id, size)
@@ -55,12 +56,13 @@ const enable_who_has_read = Ref(true)
 const enable_random_fref_serve = Ref(true)
 const wrkrips = Dict{IPv4,Vector{Int}}() # cached IP-pid map to lookup FileRef locations
 
-is_my_ip(ip) = getipaddr() == IPv4(ip)
+is_my_ip(ip::String) = getipaddr() == IPv4(ip)
+is_my_ip(ip::IPv4) = getipaddr() == ip
 
 function get_wrkrips()
     d = Dict{IPv4,Vector{Int}}()
-    for w in Base.Distributed.PGRP.workers
-        wip = IPv4(isa(w, Base.Distributed.Worker) ? get(w.config.bind_addr) : w.bind_addr)
+    for w in Distributed.PGRP.workers
+        wip = IPv4(isa(w, Distributed.Worker) ? w.config.bind_addr : w.bind_addr)
         if wip in keys(d)
             if enable_random_fref_serve[]
                 push!(d[wip], w.id)
@@ -143,22 +145,22 @@ function _getlocal(id, remote)
     state = datastore[id]
     if remote
         if isondisk(state)
-            return FileRef(get(state.file), state.size)
+            return FileRef(state.file, state.size)
         elseif isinmemory(state)
             lru_touch(id, state.size)
-            return get(state.data)
+            return something(state.data)
         end
     else
         # local
         if isinmemory(state)
             lru_touch(id, state.size)
-            return get(state.data)
+            return something(state.data)
         elseif isondisk(state)
             # TODO: get memory mapped size and not count it as
             # much as local process size
             lru_free(state.size)
-            data = unwrap_payload(open(deserialize, get(state.file), "r+"))
-            state.data = Nullable{Any}(data)
+            data = unwrap_payload(open(deserialize, state.file, "r+"))
+            state.data = Some{Any}(data)
             lru_touch(id, state.size) # load back to memory
             return data
         end
@@ -170,11 +172,11 @@ function datastore_delete(id)
     (id in keys(datastore)) || (return nothing)
     state = datastore[id]
     if isondisk(state)
-        f = get(state.file)
+        f = state.file
         isfile(f) && rm(f; force=true)
     end
     # release
-    state.data = Nullable{Any}()
+    state.data = nothing
     delete!(lru_order, id)
     delete!(datastore, id)
     # TODO: maybe cleanup from the who_has_read list?
@@ -231,10 +233,10 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
         serialize(io, MMWrap(poolget(r)))
     end
     s = datastore[r.id]
-    s.file = Nullable(path)
+    s.file = path
     fref = FileRef(path, r.size)
     if !keepinmemory
-        s.data = Nullable{Any}()
+        s.data = nothing
         delete!(lru_order, r.id)
     end
 
