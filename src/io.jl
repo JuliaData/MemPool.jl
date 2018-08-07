@@ -1,4 +1,5 @@
 ##### Array{T} #####
+using Mmap
 
 struct MMSer{T} end # sentinal type used in deserialize to switch to our
                     # custom memory-mapping deserializers
@@ -6,21 +7,38 @@ struct MMSer{T} end # sentinal type used in deserialize to switch to our
 can_mmap(io::IOStream) = true
 can_mmap(io::IO) = false
 
-function deserialize{T}(s::AbstractSerializer, ::Type{MMSer{T}})
+function padalign(io::IOStream, align=8)
+    p = position(io)
+    if p & (align-1) !== 0
+        write(io, zeros(UInt8, (align-p % align)))
+    end
+end
+padalign(io, align=8) = nothing
+
+function seekpadded(io::IOStream, align=8)
+    p = position(io)
+    if p & (align-1) !== 0
+        seek(io, p+(align-p%align))
+    end
+end
+seekpadded(io, align=8) = nothing
+
+function deserialize(s::AbstractSerializer, ::Type{MMSer{T}}) where T
     mmread(T, s, can_mmap(s.io))
 end
 
-mmwrite(io::IO, xs) = mmwrite(SerializationState(io), xs)
+mmwrite(io::IO, xs) = mmwrite(Serializer(io), xs)
 mmwrite(io::AbstractSerializer, xs) = serialize(io, xs) # fallback
 
 function mmwrite(io::AbstractSerializer, arr::A) where A<:Union{Array,BitArray}
     T = eltype(A)
-    Base.serialize_type(io, MMSer{typeof(arr)})
-    if isbits(T)
+    Serialization.serialize_type(io, MMSer{typeof(arr)})
+    if isbitstype(T)
         serialize(io, size(arr))
+        padalign(io.io, sizeof(eltype(arr)))
         write(io.io, arr)
         return
-    elseif T<:Union{} || T<:Nullable{Union{}}
+    elseif T<:Union{} || T==Missing
         serialize(io, size(arr))
         return
     end
@@ -38,27 +56,29 @@ end
 
 function mmread(::Type{A}, io, mmap) where A<:Union{Array,BitArray}
     T = eltype(A)
-    if isbits(T)
+    if isbitstype(T)
         sz = deserialize(io)
         if prod(sz) == 0
-            return A(sz...)
+            return A(undef, sz...)
         end
+        seekpadded(io.io, sizeof(T))
         if mmap
             data = Mmap.mmap(io.io, A, sz, position(io.io))
             seek(io.io, position(io.io)+sizeof(data)) # move
             return data
         else
-            return Base.read!(io.io, A(sz...))
+            data = Base.read!(io.io, A(undef, sz...))
+            return data
         end
-    elseif T<:Union{} || T<:Nullable{Union{}}
+    elseif T<:Union{} || T==Missing
         sz = deserialize(io)
-        return Array{T}(sz)
+        return Array{T}(undef, sz)
     end
 
     fl = fixedlength(T)
     if fl > 0
         sz = deserialize(io)
-        arr = A(sz...)
+        arr = A(undef, sz...)
         @inbounds for i in eachindex(arr)
             arr[i] = fast_read(io.io, T)::T
         end
@@ -73,7 +93,7 @@ end
 const UNDEF_LENGTH = typemax(UInt32) # if your string is exaclty 4GB you're out of luck
 
 function mmwrite(io::AbstractSerializer, xs::Array{String})
-    Base.serialize_type(io, MMSer{typeof(xs)})
+    Serialization.serialize_type(io, MMSer{typeof(xs)})
 
     lengths = UInt32[]
     buffer = UInt8[]
@@ -87,7 +107,7 @@ function mmwrite(io::AbstractSerializer, xs::Array{String})
             lb = length(buffer)
             push!(lengths, l)
             resize!(buffer, lb+l)
-            unsafe_copy!(pointer(buffer)+lb, pointer(x), l)
+            unsafe_copyto!(pointer(buffer)+lb, pointer(x), l)
             ptr += l
         else
             push!(lengths, UNDEF_LENGTH)
@@ -98,7 +118,7 @@ function mmwrite(io::AbstractSerializer, xs::Array{String})
     mmwrite(io, lengths)
 end
 
-function mmread{N}(::Type{Array{String,N}}, io, mmap)
+function mmread(::Type{Array{String,N}}, io, mmap) where N
     sz = deserialize(io)
     buf = deserialize(io)
     lengths = deserialize(io)
@@ -106,7 +126,7 @@ function mmread{N}(::Type{Array{String,N}}, io, mmap)
    #@assert length(buf) == sum(filter(x->x>0, lengths))
    #@assert prod(sz) == length(lengths)
 
-    ys = Array{String,N}(sz...) # output
+    ys = Array{String,N}(undef, (sz...,)) # output
     ptr = pointer(buf)
     @inbounds for i = 1:length(ys)
         l = lengths[i]
@@ -121,10 +141,10 @@ end
 ## Optimized fixed length IO
 ## E.g. this is very good for `StaticArrays.MVector`s
 
-function fixedlength(t::Type, cycles=ObjectIdDict())
-    if isbits(t)
+function fixedlength(t::Type, cycles=IdDict())
+    if isbitstype(t)
         return sizeof(t)
-    elseif isa(t, UnionAll)
+    elseif isa(t, UnionAll) || isabstracttype(t)
         return -1
     end
 
@@ -132,7 +152,7 @@ function fixedlength(t::Type, cycles=ObjectIdDict())
         return -1
     end
     cycles[t] = nothing
-    lens = ntuple(i->fixedlength(fieldtype(t, i), copy(cycles)), nfields(t))
+    lens = ntuple(i->fixedlength(fieldtype(t, i), copy(cycles)), fieldcount(t))
     if isempty(lens)
         # e.g. abstract type / array type
         return -1
@@ -147,37 +167,37 @@ fixedlength(t::Type{<:String}, cycles=nothing) = -1
 fixedlength(t::Type{Union{}}, cycles=nothing) = -1
 fixedlength(t::Type{<:Ptr}, cycles=nothing) = -1
 
-function gen_writer{T}(::Type{T}, expr)
+function gen_writer(::Type{T}, expr) where T
     @assert fixedlength(T) >= 0 "gen_writer must be called for fixed length eltypes"
-    if T<:Tuple && isbits(T)
+    if T<:Tuple && isbitstype(T)
         :(write(io, Ref{$T}($expr)))
     elseif length(T.types) > 0
         :(begin
-              $([gen_writer(fieldtype(T, i), :(getfield($expr, $i))) for i=1:nfields(T)]...)
+              $([gen_writer(fieldtype(T, i), :(getfield($expr, $i))) for i=1:fieldcount(T)]...)
           end)
-    elseif isbits(T) && sizeof(T) == 0
+    elseif isbitstype(T) && sizeof(T) == 0
         return :(begin end)
-    elseif isbits(T)
+    elseif isbitstype(T)
         return :(write(io, $expr))
     else
         error("Don't know how to serialize $T")
     end
 end
 
-function gen_reader{T}(::Type{T})
+function gen_reader(::Type{T}) where T
     @assert fixedlength(T) >= 0 "gen_reader must be called for fixed length eltypes"
     ex = if T<:Tuple
-        if isbits(T)
-            return :(read(io, Ref{$T}())[])
+        if isbitstype(T)
+            return :(read!(io, Ref{$T}())[])
         else
-            exprs = [gen_reader(fieldtype(T, i)) for i=1:nfields(T)]
+            exprs = [gen_reader(fieldtype(T, i)) for i=1:fieldcount(T)]
             return :(tuple($(exprs...)))
         end
     elseif length(T.types) > 0
-        return :(ccall(:jl_new_struct, Any, (Any,Any...), $T, $([gen_reader(fieldtype(T, i)) for i=1:nfields(T)]...)))
-    elseif isbits(T) && sizeof(T) == 0
+        return :(ccall(:jl_new_struct, Any, (Any,Any...), $T, $([gen_reader(fieldtype(T, i)) for i=1:fieldcount(T)]...)))
+    elseif isbitstype(T) && sizeof(T) == 0
         return :(ccall(:jl_new_struct, Any, (Any,Any...), $T))
-    elseif isbits(T)
+    elseif isbitstype(T)
         return :($T; read(io, $T))
     else
         error("Don't know how to deserialize $T")
@@ -189,6 +209,6 @@ end
     gen_writer(x, :x)
 end
 
-@generated function fast_read{T}(io, ::Type{T})
+@generated function fast_read(io, ::Type{T}) where T
     gen_reader(T)
 end

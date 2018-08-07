@@ -5,7 +5,9 @@
 # This file can be included multiple times in the same module if necessary,
 # which can happen with unisolated test runs.
 
-if !isdefined(:testenv_defined)
+using Distributed
+
+if !(@isdefined testenv_defined)
     const testenv_defined = true
     if haskey(ENV, "JULIA_TEST_EXEFLAGS")
         const test_exeflags = `$(Base.shell_split(ENV["JULIA_TEST_EXEFLAGS"]))`
@@ -23,7 +25,7 @@ if !isdefined(:testenv_defined)
     if haskey(ENV, "JULIA_TEST_EXENAME")
         const test_exename = `$(Base.shell_split(ENV["JULIA_TEST_EXENAME"]))`
     else
-        const test_exename = `$(joinpath(JULIA_HOME, Base.julia_exename()))`
+        const test_exename = Base.julia_cmd()
     end
 
     addprocs_with_testenv(X; kwargs...) = addprocs(X; exename=test_exename, exeflags=test_exeflags, kwargs...)
