@@ -140,7 +140,6 @@ end
     @everywhere MemPool.enable_random_fref_serve[] = false
     @everywhere empty!(MemPool.wrkrips)
     @test MemPool.is_my_ip(getipaddr())
-    @test MemPool.is_my_ip("127.0.0.1")
 end
 
 inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datastore[id]), ref.owner, ref.id)

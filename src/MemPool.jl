@@ -1,5 +1,3 @@
-__precompile__()
-
 module MemPool
 
 using Serialization, Sockets, Random
