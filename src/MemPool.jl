@@ -70,7 +70,7 @@ end
 
 function approx_size(d::AbstractArray{T}) where T
     isempty(d) && return 0
-    isbits(T) && return sizeof(d)
+    isbitstype(T) && return sizeof(d)
     approx_size(T, length(d), d)
 end
 
