@@ -143,7 +143,7 @@ end
 ## E.g. this is very good for `StaticArrays.MVector`s
 
 function fixedlength(t::Type, cycles=IdDict())
-    if isbitstype(t)
+    if isbitstype(t) || Base.isbitsunion(t)
         return sizeof(t)
     elseif isa(t, UnionAll) || isabstracttype(t)
         return -1
