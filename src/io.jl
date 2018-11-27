@@ -145,7 +145,7 @@ end
 function fixedlength(t::Type, cycles=IdDict())
     if isbitstype(t)
         return sizeof(t)
-    elseif isa(t, UnionAll) || isabstracttype(t)
+    elseif isa(t, UnionAll) || isabstracttype(t) || Base.isbitsunion(t)
         return -1
     end
 
