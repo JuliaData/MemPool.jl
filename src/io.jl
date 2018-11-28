@@ -33,13 +33,13 @@ mmwrite(io::AbstractSerializer, xs) = serialize(io, xs) # fallback
 function mmwrite(io::AbstractSerializer, arr::A) where A<:Union{Array,BitArray}
     T = eltype(A)
     Serialization.serialize_type(io, MMSer{typeof(arr)})
-    if isbitstype(T)
+    if T<:Union{} || T==Missing
+        serialize(io, size(arr))
+        return
+    elseif isbitstype(T)
         serialize(io, size(arr))
         padalign(io.io, sizeof(eltype(arr)))
         write(io.io, arr)
-        return
-    elseif T<:Union{} || T==Missing
-        serialize(io, size(arr))
         return
     end
 
@@ -56,7 +56,10 @@ end
 
 function mmread(::Type{A}, io, mmap) where A<:Union{Array,BitArray}
     T = eltype(A)
-    if isbitstype(T)
+    if T<:Union{} || T==Missing
+        sz = deserialize(io)
+        return Array{T}(undef, sz)
+    elseif isbitstype(T)
         sz = deserialize(io)
         seekpadded(io.io, sizeof(T))
 
@@ -71,9 +74,6 @@ function mmread(::Type{A}, io, mmap) where A<:Union{Array,BitArray}
             data = Base.read!(io.io, A(undef, sz...))
             return data
         end
-    elseif T<:Union{} || T==Missing
-        sz = deserialize(io)
-        return Array{T}(undef, sz)
     end
 
     fl = fixedlength(T)
@@ -143,9 +143,9 @@ end
 ## E.g. this is very good for `StaticArrays.MVector`s
 
 function fixedlength(t::Type, cycles=IdDict())
-    if isbitstype(t) || Base.isbitsunion(t)
+    if isbitstype(t)
         return sizeof(t)
-    elseif isa(t, UnionAll) || isabstracttype(t)
+    elseif isa(t, UnionAll) || isabstracttype(t) || Base.isbitsunion(t)
         return -1
     end
 
