@@ -37,9 +37,10 @@ struct FileRef
     host::IPAddr
     file::String
     size::UInt
+    force_pid::Ref{Union{Int, Nothing}}
 
-    function FileRef(file, size)
-        new(host, file, size)
+    function FileRef(file, size; pid=nothing)
+        new(host, file, size, Ref{Union{Int, Nothing}}(pid))
     end
 end
 

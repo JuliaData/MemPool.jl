@@ -23,12 +23,12 @@ const id_counter = Ref(0)
 function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
     if pid == myid()
         id = id_counter[] += 1
-        lru_free(size)
+        #lru_free(size)
         datastore[id] = RefState(size,
                                  Some{Any}(x),
                                  file,
                                  destroyonevict)
-        lru_touch(id, size)
+        #lru_touch(id, size)
         DRef(myid(), id, size)
     else
         # use our serialization
@@ -147,21 +147,21 @@ function _getlocal(id, remote)
         if isondisk(state)
             return FileRef(state.file, state.size)
         elseif isinmemory(state)
-            lru_touch(id, state.size)
+            #lru_touch(id, state.size)
             return something(state.data)
         end
     else
         # local
         if isinmemory(state)
-            lru_touch(id, state.size)
+            #lru_touch(id, state.size)
             return something(state.data)
         elseif isondisk(state)
             # TODO: get memory mapped size and not count it as
             # much as local process size
-            lru_free(state.size)
+            #lru_free(state.size)
             data = unwrap_payload(open(deserialize, state.file, "r+"))
             state.data = Some{Any}(data)
-            lru_touch(id, state.size) # load back to memory
+            #lru_touch(id, state.size) # load back to memory
             return data
         end
     end
@@ -177,7 +177,7 @@ function datastore_delete(id)
     end
     # release
     state.data = nothing
-    delete!(lru_order, id)
+    #delete!(lru_order, id)
     delete!(datastore, id)
     # TODO: maybe cleanup from the who_has_read list?
     nothing
@@ -237,7 +237,7 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     fref = FileRef(path, r.size)
     if !keepinmemory
         s.data = nothing
-        delete!(lru_order, r.id)
+        #delete!(lru_order, r.id)
     end
 
     return fref
@@ -269,57 +269,59 @@ function deletefromdisk(r::DRef, path)
     end
 end
 
-### LRU
-
-using DataStructures
-
-const max_memsize = Ref{UInt}(2^30)
-const lru_order = OrderedDict{Int, UInt}()
-
-# marks the ref as most recently used
-function lru_touch(id::Int, sz = datastore[id].size)
-    if haskey(lru_order, id)
-        delete!(lru_order, id)
-        lru_order[id] = sz
-    else
-        lru_order[id] = sz
-    end
-end
-
-# returns ref ids that can be evicted to keep
-# space below max_memsize
-function lru_evictable(required=0)
-    total_size = UInt(sum(values(lru_order)) + required)
-    if total_size <= max_memsize[]
-        return Int[] # nothing to evict
-    end
-
-    size_to_evict = total_size - max_memsize[]
-    memsum = UInt(0)
-    evictable = Int[]
-
-    for (k, v) in lru_order
-        if total_size - memsum <= max_memsize[]
-            break
-        end
-        memsum += v
-        push!(evictable, k)
-    end
-    return evictable
-end
-
-const spilltodisk = Ref(false)
-
-function lru_free(sz)
-    list = lru_evictable(sz)
-    for id in list
-        state = datastore[id]
-        ref = DRef(myid(), id, state.size)
-        if state.destroyonevict
-            pooldelete(ref)
-        else
-            !spilltodisk[] && continue
-            movetodisk(ref)
-        end
-    end
-end
+#### LRU
+#
+#using DataStructures
+#
+#const max_memsize = Ref{UInt}(2^30)
+#const lru_order = OrderedDict{Int, UInt}()
+#
+## marks the ref as most recently used
+#function lru_touch(id::Int, sz = datastore[id].size)
+#    if haskey(lru_order, id)
+#	delete!(lru_order, id)
+#	lru_order[id] = sz
+#    else
+#	lru_order[id] = sz
+#    end
+#end
+#
+## returns ref ids that can be evicted to keep
+## space below max_memsize
+#function lru_evictable(required=0)
+#    total_size = UInt(sum(values(lru_order)) + required)
+#    if total_size <= max_memsize[]
+#	return Int[] # nothing to evict
+#    end
+#
+#    size_to_evict = total_size - max_memsize[]
+#    memsum = UInt(0)
+#    evictable = Int[]
+#
+#    for (k, v) in lru_order
+#	if total_size - memsum <= max_memsize[]
+#	    break
+#	end
+#	if datastore[k].destroyonevict # remove only recomputable chunks
+#	    memsum += v
+#	    push!(evictable, k)
+#	end
+#    end
+#    return evictable
+#end
+#
+#const spilltodisk = Ref(false)
+#
+#function lru_free(sz)
+#    list = lru_evictable(sz)
+#    for id in list
+#	state = datastore[id]
+#	ref = DRef(myid(), id, state.size)
+#	if state.destroyonevict
+#	    pooldelete(ref)
+#	else
+#	    !spilltodisk[] && continue
+#	    #movetodisk(ref)
+#	end
+#    end
+#end
