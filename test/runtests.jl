@@ -13,7 +13,7 @@ using Test
 
 import Sockets: getipaddr
 
-import MemPool: lru_touch, lru_evictable, mmwrite, mmread
+#import MemPool: lru_touch, lru_evictable, mmwrite, mmread
 
 function roundtrip(x, eq=(==), io=IOBuffer())
     mmwrite(Serializer(io), x)
@@ -74,6 +74,7 @@ import Base: ==
     roundtrip([(Empty(),) for i=1:4])
 end
 
+#=
 @testset "lru" begin
     # clean up
     tmpsz = MemPool.max_memsize[]
@@ -97,6 +98,7 @@ end
     MemPool.max_memsize[] = tmpsz
     empty!(MemPool.lru_order)
 end
+=#
 
 @testset "set-get-delete" begin
     r1 = poolset([1,2])
@@ -110,10 +112,10 @@ end
     pooldelete(r2)
     pooldelete(r3)
     @test_throws KeyError poolget(r2)
-    @test isempty(MemPool.lru_order)
-    @test fetch(@spawnat 2 isempty(MemPool.lru_order))
+    #@test isempty(MemPool.lru_order)
+    #@test fetch(@spawnat 2 isempty(MemPool.lru_order))
     @test isempty(MemPool.datastore)
-    @test fetch(@spawnat 2 isempty(MemPool.datastore))
+    #@test fetch(@spawnat 2 isempty(MemPool.datastore))
 end
 
 @testset "movetodisk" begin
@@ -127,7 +129,7 @@ end
     @test fref2.file == f
     @test poolget(fref) == poolget(fref2)
     pooldelete(ref)
-    @test fetch(@spawnat 2 isempty(MemPool.lru_order))
+    #@test fetch(@spawnat 2 isempty(MemPool.lru_order))
     @test fetch(@spawnat 2 isempty(MemPool.datastore))
 
     ref = poolset([1,2], 2)
@@ -143,6 +145,7 @@ end
 end
 
 inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datastore[id]), ref.owner, ref.id)
+#=
 @testset "lru free" begin
     @everywhere MemPool.max_memsize[] = 8*10
     @everywhere MemPool.spilltodisk[] = true
@@ -173,6 +176,7 @@ inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datas
     map(pooldelete, [r1,r2,r4,r5,r6])
     @everywhere MemPool.max_memsize[] = 2e9
 end
+=#
 
 @testset "who_has_read" begin
     f = tempname()
