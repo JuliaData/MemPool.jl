@@ -157,16 +157,17 @@ function fixedlength(t::Type, cycles=IdDict())
     if isempty(lens)
         # e.g. abstract type / array type
         return -1
-    elseif any(x->x<0, lens)
+    elseif any(x -> x < 0, lens)
         return -1
     else
         return sum(lens)
     end
 end
 
-fixedlength(t::Type{<:String}, cycles=nothing) = -1
-fixedlength(t::Type{Union{}}, cycles=nothing) = -1
-fixedlength(t::Type{<:Ptr}, cycles=nothing) = -1
+fixedlength(::Type{>:Missing}, cycles=nothing) = -1
+fixedlength(::Type{<:String}, cycles=nothing) = -1
+fixedlength(::Type{Union{}}, cycles=nothing) = -1
+fixedlength(::Type{<:Ptr}, cycles=nothing) = -1
 
 function gen_writer(::Type{T}, expr) where T
     @assert fixedlength(T) >= 0 "gen_writer must be called for fixed length eltypes"
