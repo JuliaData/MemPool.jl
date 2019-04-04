@@ -104,8 +104,9 @@ end
     r1 = poolset([1,2])
     r2 = poolset(["abc","def"], 2)
     r3 = poolset([Ref(1),Ref(2)], 2)
-    @test poolget(r1) == [1,2]
+    @everywhere GC.gc()
     @test poolget(r2) == ["abc","def"]
+    @test poolget(r1) == [1,2]
     @test map(getindex, poolget(r3)) == [1,2]
     pooldelete(r1)
     @test_throws KeyError poolget(r1)
