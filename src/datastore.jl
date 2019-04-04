@@ -1,7 +1,7 @@
 ## datastore
 using Distributed
 
-struct DRef
+mutable struct DRef
     owner::Int
     id::Int
     size::UInt
