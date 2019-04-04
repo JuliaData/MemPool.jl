@@ -5,6 +5,14 @@ struct DRef
     owner::Int
     id::Int
     size::UInt
+    rc::RemoteChannel
+
+    function DRef(o, i, s)
+        rc = RemoteChannel()
+        d = new(o, i, s, rc)
+        finalizer(x -> pooldelete(d), rc)
+        d
+    end
 end
 
 mutable struct RefState
