@@ -15,30 +15,24 @@ mutable struct DRef
     end
 end
 
-using InteractiveUtils
 function finalize_ref(owner, id, rc)
     let rid=Distributed.RRID(rc.whence, rc.id), finid=myid()
         @async begin
             # Send to the owner of the DRef a message
             # asking it to delete the data if the ref's
             # remote channel has no one in its clientset
-            println("remotecall fetching")
-        try
-            remotecall_fetch(owner, rid, finid) do rid, finid
-                refval = Distributed.lookup_ref(rid)
-                # If only one who has this ref is the finalizer worker
-                # Delete it.
-                @show refval.clientset
-                @show owner
-                @show finid
-                if refval.clientset == BitSet([finid])
-                    pooldelete(owner, id)
-                    println("DRef($owner, $id) was deleted")
+            try
+                remotecall_fetch(owner, rid, finid) do rid, finid
+                    refval = Distributed.lookup_ref(rid)
+                    # If only one who has this ref is the finalizer worker
+                    # Delete it.
+                    if refval.clientset == BitSet([finid])
+                        pooldelete(owner, id)
+                    end
                 end
+            catch err
+                @show err
             end
-        catch err
-            @show err
-        end
         end
     end
  end
