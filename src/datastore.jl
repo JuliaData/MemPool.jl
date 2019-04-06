@@ -10,6 +10,7 @@ mutable struct DRef
     function DRef(o, i, s)
         rc = RemoteChannel()
         d = new(o, i, s, rc)
+        println("Finalizer for $i added")
         finalizer(x->finalize_ref(o, i, x), rc)
         d
     end
@@ -18,6 +19,7 @@ end
 function finalize_ref(owner, id, rc)
     let rid=Distributed.RRID(rc.whence, rc.id), finid=myid()
         @async begin
+            println("Finalizer running for $id")
             # Send to the owner of the DRef a message
             # asking it to delete the data if the ref's
             # remote channel has no one in its clientset
@@ -27,6 +29,7 @@ function finalize_ref(owner, id, rc)
                     # If only one who has this ref is the finalizer worker
                     # Delete it.
                     if refval.clientset == BitSet([finid])
+                        println("Cleaning up $id")
                         pooldelete(owner, id)
                     end
                 end
