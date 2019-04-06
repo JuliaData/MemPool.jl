@@ -1,5 +1,6 @@
 ## datastore
 using Distributed
+using Serialization
 
 mutable struct DRef
     owner::Int
@@ -38,7 +39,22 @@ function finalize_ref(owner, id, rc)
             end
         end
     end
- end
+end
+
+function Serialization.deserialize(io::AbstractSerializer, dt::Type{DRef})
+    nf = fieldcount(dt)
+    c = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
+    Serialization.deserialize_cycle(io, c)
+    for i in 1:nf
+        tag = Int32(read(io.io, UInt8)::UInt8)
+        if tag != Serialization.UNDEFREF_TAG
+            ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), c, i-1, Serialization.handle_deserialize(io, tag))
+        end
+    end
+    println("Finalizer added for $(c.id) in deserialize")
+    finalizer(x->finalize_ref(c.owner, c.id, x), c.rc)
+    c
+end
 
 mutable struct RefState
     size::UInt64
