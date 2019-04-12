@@ -2,7 +2,7 @@
 using Distributed
 using Serialization
 
-mutable struct DRef
+struct DRef
     owner::Int
     id::Int
     size::UInt
@@ -41,18 +41,13 @@ function finalize_ref(owner, id, rc)
     end
 end
 
-function Serialization.deserialize(io::AbstractSerializer, dt::Type{DRef})
-    nf = fieldcount(dt)
-    c = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
-    Serialization.deserialize_cycle(io, c)
-    for i in 1:nf
-        tag = Int32(read(io.io, UInt8)::UInt8)
-        if tag != Serialization.UNDEFREF_TAG
-            ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), c, i-1, Serialization.handle_deserialize(io, tag))
-        end
+@noinline base_deserialize(io, dt) = invoke(deserialize, Tuple{AbstractSerializer, DataType}, io, dt)
+
+function Serialization.deserialize(io::Distributed.ClusterSerializer, dt::Type{DRef})
+    c = base_deserialize(io, dt)
+    let owner = c.owner, id = c.id
+        finalizer(x->finalize_ref(owner, id, x), c.rc)
     end
-    println("Finalizer added for $(c.id) in deserialize")
-    finalizer(x->finalize_ref(c.owner, c.id, x), c.rc)
     c
 end
 
