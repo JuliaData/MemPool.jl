@@ -169,6 +169,7 @@ function _getlocal(id, remote)
 end
 
 function datastore_delete(id)
+    return nothing  # FIXME TODO This is bad and a hack
     (id in keys(datastore)) || (return nothing)
     state = datastore[id]
     if isondisk(state)
@@ -220,7 +221,7 @@ end
 default_dir(p) = joinpath(".mempool", "$session-$p")
 default_path(r::DRef) = joinpath(default_dir(r.owner), string(r.id))
 
-function movetodisk(r::DRef, path=default_path(r), keepinmemory=false) 
+function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     if r.owner != myid()
         return remotecall_fetch(movetodisk, r.owner, r, path)
     end
