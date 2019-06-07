@@ -100,7 +100,11 @@ end
 
 function __init__()
     global session = "sess-" * randstring(5)
-    global host = getipaddr()
+    try
+        global host = getipaddr()
+    catch err
+        global host = Sockets.localhost
+    end
 end
 
 end # module
