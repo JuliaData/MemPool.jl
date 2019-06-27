@@ -28,10 +28,15 @@ function roundtrip(x, eq=(==), io=IOBuffer())
     end
 end
 
+primitive type TestInt160 160 end
+
 @testset "Array" begin
     roundtrip(rand(10))
     roundtrip(BitArray(rand(Bool,10)))
     roundtrip(map(Ref, rand(10)), (x,y)->getindex.(x) == getindex.(y))
+    mktemp() do path, f
+        roundtrip(Vector{TestInt160}(undef, 10), (x,y)->true, f)
+    end
 
     io = IOBuffer()
     x = Array{Union{}}(undef, 10)

@@ -8,17 +8,19 @@ can_mmap(io::IOStream) = true
 can_mmap(io::IO) = false
 
 function padalign(io::IOStream, align=8)
+    align = (align + 7) & -8  # make sure alignment is a multiple of 8
     p = position(io)
-    if p & (align-1) !== 0
-        write(io, zeros(UInt8, (align-p % align)))
+    if p & (align-1) != 0
+        write(io, zeros(UInt8, (align - (p % align))))
     end
 end
 padalign(io, align=8) = nothing
 
 function seekpadded(io::IOStream, align=8)
+    align = (align + 7) & -8
     p = position(io)
-    if p & (align-1) !== 0
-        seek(io, p+(align-p%align))
+    if p & (align-1) != 0
+        seek(io, p + (align - (p % align)))
     end
 end
 seekpadded(io, align=8) = nothing
