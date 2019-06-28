@@ -25,7 +25,7 @@ function serialize(io::AbstractSerializer, w::MMWrap)
     mmwrite(io, w.x)
 end
 
-function deserialize(io::AbstractSerializer, ::Type{MMWrap})
+function deserialize(io::AbstractSerializer, T::Type{MMWrap})
     MMWrap(mmread(T, io)) # gotta keep that wrapper on
 end
 
