@@ -62,7 +62,11 @@ is_my_ip(ip::IPv4) = getipaddr() == ip
 function get_wrkrips()
     d = Dict{IPv4,Vector{Int}}()
     for w in Distributed.PGRP.workers
-        wip = IPv4(isa(w, Distributed.Worker) ? w.config.bind_addr : w.bind_addr)
+        if w isa Distributed.Worker
+            wip = IPv4(w.config.bind_addr)
+        else
+            wip = isdefined(w, :bind_addr) ? IPv4(w.bind_addr) : MemPool.host
+        end
         if wip in keys(d)
             if enable_random_fref_serve[]
                 push!(d[wip], w.id)
