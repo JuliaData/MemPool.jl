@@ -197,9 +197,10 @@ end
 function cleanup()
     empty!(file_to_dref)
     empty!(who_has_read)
-    safe() do
-        map(datastore_delete, collect(keys(datastore)))
+    ks = safe() do
+        collect(keys(datastore))
     end
+    map(datastore_delete, ks)
     d = default_dir(myid())
     isdir(d) && rm(d; recursive=true)
     nothing
