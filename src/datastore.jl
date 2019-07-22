@@ -17,17 +17,23 @@ end
 isinmemory(x::RefState) = x.data !== nothing
 isondisk(x::RefState) = x.file !== nothing
 
+using .Threads
+
 const datastore = Dict{Int,RefState}()
-const id_counter = Ref(0)
+const datastore_lock = Threads.Mutex()
+safe(f) = (lock(datastore_lock); f(); unlock(datastore_lock))
+const id_counter = Atomic{Int}(0)
 
 function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
     if pid == myid()
-        id = id_counter[] += 1
+        id = atomic_add!(id_counter, 1)
         #lru_free(size)
-        datastore[id] = RefState(size,
-                                 Some{Any}(x),
-                                 file,
-                                 destroyonevict)
+        safe() do
+            datastore[id] = RefState(size,
+                                     Some{Any}(x),
+                                     file,
+                                     destroyonevict)
+        end
         #lru_touch(id, size)
         DRef(myid(), id, size)
     else
@@ -142,7 +148,7 @@ function poolget(r::DRef)
 end
 
 function _getlocal(id, remote)
-    state = datastore[id]
+    state = safe(()->datastore[id])
     if remote
         if isondisk(state)
             return FileRef(state.file, state.size)
@@ -169,8 +175,10 @@ function _getlocal(id, remote)
 end
 
 function datastore_delete(id)
-    (id in keys(datastore)) || (return nothing)
-    state = datastore[id]
+    safe() do
+        haskey(datastore, id) || (return nothing)
+        state = datastore[id]
+    end
     if isondisk(state)
         f = state.file
         isfile(f) && rm(f; force=true)
@@ -178,7 +186,9 @@ function datastore_delete(id)
     # release
     state.data = nothing
     #delete!(lru_order, id)
-    delete!(datastore, id)
+    safe() do
+        haskey(datastore, id) && delete!(datastore, id)
+    end
     # TODO: maybe cleanup from the who_has_read list?
     nothing
 end
@@ -186,7 +196,9 @@ end
 function cleanup()
     empty!(file_to_dref)
     empty!(who_has_read)
-    map(datastore_delete, collect(keys(datastore)))
+    safe() do
+        map(datastore_delete, collect(keys(datastore)))
+    end
     d = default_dir(myid())
     isdir(d) && rm(d; recursive=true)
     nothing
@@ -232,7 +244,10 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     open(path, "w") do io
         serialize(io, MMWrap(poolget(r)))
     end
-    s = datastore[r.id]
+    safe() do
+        s = datastore[r.id]
+    end
+    # XXX: is this OK??
     s.file = path
     fref = FileRef(path, r.size)
     if !keepinmemory
