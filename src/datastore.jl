@@ -20,7 +20,7 @@ const datastore = Dict{Int,RefState}()
 const datastore_lock = Ref{Union{Nothing, Mutex}}(nothing)
 const id_counter = Ref{Union{Nothing, Atomic{Int}}}(nothing)
 
-safe(f) = (lock(datastore_lock[]); f(); unlock(datastore_lock[]))
+safe(f) = (lock(datastore_lock[]); x = f(); unlock(datastore_lock[]); x)
 
 isinmemory(x::RefState) = x.data !== nothing
 isondisk(x::RefState) = x.file !== nothing
@@ -176,10 +176,10 @@ function _getlocal(id, remote)
 end
 
 function datastore_delete(id)
-    safe() do
-        haskey(datastore, id) || (return nothing)
-        state = datastore[id]
+    state = safe() do
+        haskey(datastore, id) ? datastore[id] : nothing
     end
+    (state === nothing) && return
     if isondisk(state)
         f = state.file
         isfile(f) && rm(f; force=true)
