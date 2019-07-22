@@ -14,19 +14,20 @@ mutable struct RefState
     destroyonevict::Bool # if true, will be removed from memory
 end
 
-isinmemory(x::RefState) = x.data !== nothing
-isondisk(x::RefState) = x.file !== nothing
-
 using .Threads
 
 const datastore = Dict{Int,RefState}()
-const datastore_lock = Threads.Mutex()
-safe(f) = (lock(datastore_lock); f(); unlock(datastore_lock))
-const id_counter = Atomic{Int}(0)
+const datastore_lock = Ref{Union{Nothing, Mutex}}(nothing)
+const id_counter = Ref{Union{Nothing, Atomic{Int}}}(nothing)
+
+safe(f) = (lock(datastore_lock[]); f(); unlock(datastore_lock[]))
+
+isinmemory(x::RefState) = x.data !== nothing
+isondisk(x::RefState) = x.file !== nothing
 
 function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
     if pid == myid()
-        id = atomic_add!(id_counter, 1)
+        id = atomic_add!(id_counter[], 1)
         #lru_free(size)
         safe() do
             datastore[id] = RefState(size,
