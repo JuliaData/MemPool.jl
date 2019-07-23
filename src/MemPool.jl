@@ -105,7 +105,7 @@ function __init__()
     catch err
         global host = Sockets.localhost
     end
-    datastore_lock[] = Mutex()
+    datastore_lock[] = ReentrantLock()
     id_counter[] = Atomic{Int}(0)
 end
 

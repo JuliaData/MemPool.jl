@@ -17,10 +17,14 @@ end
 using .Threads
 
 const datastore = Dict{Int,RefState}()
-const datastore_lock = Ref{Union{Nothing, Mutex}}(nothing)
+const datastore_lock = Ref{Union{Nothing, ReentrantLock}}(nothing)
 const id_counter = Ref{Union{Nothing, Atomic{Int}}}(nothing)
 
-safe(f) = (lock(datastore_lock[]); x = f(); unlock(datastore_lock[]); x)
+function safe(f)
+    lock(datastore_lock[]) do 
+        f()
+    end
+end
 
 isinmemory(x::RefState) = x.data !== nothing
 isondisk(x::RefState) = x.file !== nothing
@@ -246,8 +250,8 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     open(path, "w") do io
         serialize(io, MMWrap(poolget(r)))
     end
-    safe() do
-        s = datastore[r.id]
+    s = safe() do
+        datastore[r.id]
     end
     # XXX: is this OK??
     s.file = path
