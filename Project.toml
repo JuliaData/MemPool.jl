@@ -1,0 +1,28 @@
+name = "MemPool"
+uuid = "f9f48841-c794-520a-933b-121f7ba6ed94"
+license = "MIT"
+desc = "a simple distributed spill-LRU-to-disk data store"
+version = "0.3.0"
+
+[deps]
+DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+
+[compat]
+DataStructures = "≥ 0.11.0"
+julia = "≥ 1.0.0"
+
+[extras]
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["StaticArrays", "Serialization", "Test", "Random", "Sockets", "Distributed"]
