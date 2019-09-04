@@ -14,20 +14,31 @@ mutable struct RefState
     destroyonevict::Bool # if true, will be removed from memory
 end
 
+using .Threads
+
+const datastore = Dict{Int,RefState}()
+const datastore_lock = Ref{Union{Nothing, ReentrantLock}}(nothing)
+const id_counter = Ref{Union{Nothing, Atomic{Int}}}(nothing)
+
+if VERSION >= v"1.3.0-DEV"
+with_datastore_lock(f) = lock(()->f(), datastore_lock[])
+else
+with_datastore_lock(f) = f()
+end
+
 isinmemory(x::RefState) = x.data !== nothing
 isondisk(x::RefState) = x.file !== nothing
 
-const datastore = Dict{Int,RefState}()
-const id_counter = Ref(0)
-
 function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
     if pid == myid()
-        id = id_counter[] += 1
+        id = atomic_add!(id_counter[], 1)
         #lru_free(size)
-        datastore[id] = RefState(size,
-                                 Some{Any}(x),
-                                 file,
-                                 destroyonevict)
+        with_datastore_lock() do
+            datastore[id] = RefState(size,
+                                     Some{Any}(x),
+                                     file,
+                                     destroyonevict)
+        end
         #lru_touch(id, size)
         DRef(myid(), id, size)
     else
@@ -146,7 +157,7 @@ function poolget(r::DRef)
 end
 
 function _getlocal(id, remote)
-    state = datastore[id]
+    state = with_datastore_lock(()->datastore[id])
     if remote
         if isondisk(state)
             return FileRef(state.file, state.size)
@@ -173,8 +184,10 @@ function _getlocal(id, remote)
 end
 
 function datastore_delete(id)
-    (id in keys(datastore)) || (return nothing)
-    state = datastore[id]
+    state = with_datastore_lock() do
+        haskey(datastore, id) ? datastore[id] : nothing
+    end
+    (state === nothing) && return
     if isondisk(state)
         f = state.file
         isfile(f) && rm(f; force=true)
@@ -182,7 +195,9 @@ function datastore_delete(id)
     # release
     state.data = nothing
     #delete!(lru_order, id)
-    delete!(datastore, id)
+    with_datastore_lock() do
+        haskey(datastore, id) && delete!(datastore, id)
+    end
     # TODO: maybe cleanup from the who_has_read list?
     nothing
 end
@@ -190,7 +205,10 @@ end
 function cleanup()
     empty!(file_to_dref)
     empty!(who_has_read)
-    map(datastore_delete, collect(keys(datastore)))
+    ks = with_datastore_lock() do
+        collect(keys(datastore))
+    end
+    map(datastore_delete, ks)
     d = default_dir(myid())
     isdir(d) && rm(d; recursive=true)
     nothing
@@ -236,7 +254,10 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     open(path, "w") do io
         serialize(io, MMWrap(poolget(r)))
     end
-    s = datastore[r.id]
+    s = with_datastore_lock() do
+        datastore[r.id]
+    end
+    # XXX: is this OK??
     s.file = path
     fref = FileRef(path, r.size)
     if !keepinmemory
