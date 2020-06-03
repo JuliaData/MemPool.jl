@@ -2,7 +2,7 @@ name = "MemPool"
 uuid = "f9f48841-c794-520a-933b-121f7ba6ed94"
 license = "MIT"
 desc = "a simple distributed spill-LRU-to-disk data store"
-version = "0.3.0"
+version = "0.3.1"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
