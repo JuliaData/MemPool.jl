@@ -123,6 +123,23 @@ end
     #@test fetch(@spawnat 2 isempty(MemPool.datastore))
 end
 
+@testset "refcounting" begin
+    r1 = poolset([1,2])
+    key = (r1.owner,r1.id)
+    @test MemPool.local_datastore_counter[key][] == 1
+    @test MemPool.datastore_counter[key][] == 1
+    poolref(r1)
+    @test MemPool.local_datastore_counter[key][] == 2
+    @test MemPool.datastore_counter[key][] == 1
+    poolunref(r1)
+    @test MemPool.local_datastore_counter[key][] == 1
+    poolunref(r1)
+    @test !haskey(MemPool.local_datastore_counter, key)
+    @test !haskey(MemPool.datastore_counter, key)
+    @test_throws KeyError poolget(r1)
+    @test_throws AssertionError poolunref(r1)
+end
+
 @testset "movetodisk" begin
     ref = poolset([1,2], 2)
     fref = movetodisk(ref)

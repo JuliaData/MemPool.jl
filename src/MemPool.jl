@@ -4,7 +4,7 @@ using Serialization, Sockets, Random
 import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, pooldelete, destroyonevict,
        movetodisk, copytodisk, savetodisk, mmwrite, mmread, cleanup,
-       deletefromdisk
+       deletefromdisk, poolref, poolunref
 
 ## Wrapping-unwrapping of payloads:
 
