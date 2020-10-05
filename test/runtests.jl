@@ -138,6 +138,7 @@ end
     @test !haskey(MemPool.datastore_counter, key)
     @test_throws KeyError poolget(r1)
     @test_throws AssertionError poolunref(r1)
+    poolref(r1) # Necessary since we actually still hold a reference
 end
 
 @testset "movetodisk" begin

@@ -8,12 +8,13 @@ mutable struct DRef
     function DRef(owner, id, size)
         d = new(owner, id, size)
         poolref(d)
-        finalizer(x->@async(poolunref(x)), d)
+        finalizer(poolunref, d)
         d
     end
 end
 
 function Serialization.deserialize(io::AbstractSerializer, dt::Type{DRef})
+    # Construct the object
     nf = fieldcount(dt)
     d = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
     Serialization.deserialize_cycle(io, d)
@@ -23,8 +24,9 @@ function Serialization.deserialize(io::AbstractSerializer, dt::Type{DRef})
             ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), d, i-1, Serialization.handle_deserialize(io, tag))
         end
     end
+    # Add a new reference manually, and unref on finalization
     poolref(d)
-    finalizer(x->@async(poolunref(x)), d)
+    finalizer(poolunref, d)
     d
 end
 
@@ -50,7 +52,11 @@ function poolref(d::DRef)
             if d.owner == myid()
                 poolref_owner(d)
             else
-                @async remotecall(poolref_owner, d.owner, d)
+                @static if VERSION >= v"1.3.0-DEV.573"
+                    Threads.@spawn remotecall(poolref_owner, d.owner, d)
+                else
+                    @async remotecall(poolref_owner, d.owner, d)
+                end
             end
             Atomic{Int}(0)
         end
@@ -77,7 +83,11 @@ function poolunref(d::DRef)
             if d.owner == myid()
                 poolunref_owner(d)
             else
-                @async remotecall(poolunref_owner, d.owner, d)
+                @static if VERSION >= v"1.3.0-DEV.573"
+                    Threads.@spawn remotecall(poolunref_owner, d.owner, d)
+                else
+                    @async remotecall(poolunref_owner, d.owner, d)
+                end
             end
         end
     end
