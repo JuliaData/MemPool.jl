@@ -1,10 +1,33 @@
 ## datastore
 using Distributed
 
-struct DRef
+mutable struct DRef
     owner::Int
     id::Int
     size::UInt
+    function DRef(owner, id, size)
+        d = new(owner, id, size)
+        poolref(d)
+        finalizer(poolunref, d)
+        d
+    end
+end
+
+function Serialization.deserialize(io::AbstractSerializer, dt::Type{DRef})
+    # Construct the object
+    nf = fieldcount(dt)
+    d = ccall(:jl_new_struct_uninit, Any, (Any,), dt)
+    Serialization.deserialize_cycle(io, d)
+    for i in 1:nf
+        tag = Int32(read(io.io, UInt8)::UInt8)
+        if tag != Serialization.UNDEFREF_TAG
+            ccall(:jl_set_nth_field, Cvoid, (Any, Csize_t, Any), d, i-1, Serialization.handle_deserialize(io, tag))
+        end
+    end
+    # Add a new reference manually, and unref on finalization
+    poolref(d)
+    finalizer(poolunref, d)
+    d
 end
 
 mutable struct RefState
@@ -19,6 +42,66 @@ using .Threads
 const datastore = Dict{Int,RefState}()
 const datastore_lock = Ref{Union{Nothing, ReentrantLock}}(nothing)
 const id_counter = Ref{Union{Nothing, Atomic{Int}}}(nothing)
+const datastore_counter = Dict{Tuple{Int,Int}, Atomic{Int}}()
+const local_datastore_counter = Dict{Tuple{Int,Int}, Atomic{Int}}()
+
+function poolref(d::DRef)
+    with_datastore_lock() do
+        ctr = get!(local_datastore_counter, (d.owner,d.id)) do
+            # We've never seen this DRef, so tell the owner
+            if d.owner == myid()
+                poolref_owner(d)
+            else
+                @static if VERSION >= v"1.3.0-DEV.573"
+                    Threads.@spawn remotecall(poolref_owner, d.owner, d)
+                else
+                    @async remotecall(poolref_owner, d.owner, d)
+                end
+            end
+            Atomic{Int}(0)
+        end
+        atomic_add!(ctr, 1)
+    end
+end
+"Called on owner when a worker first holds a reference to `d`."
+function poolref_owner(d::DRef)
+    with_datastore_lock() do
+        ctr = get!(datastore_counter, (d.owner,d.id)) do
+            Atomic{Int}(0)
+        end
+        atomic_add!(ctr, 1)
+    end
+end
+function poolunref(d::DRef)
+    @assert haskey(local_datastore_counter, (d.owner,d.id)) "poolunref called before any poolref"
+    with_datastore_lock() do
+        ctr = local_datastore_counter[(d.owner,d.id)]
+        atomic_sub!(ctr, 1)
+        if ctr[] <= 0
+            delete!(local_datastore_counter, (d.owner,d.id))
+            # Tell the owner we hold no more references
+            if d.owner == myid()
+                poolunref_owner(d)
+            else
+                @static if VERSION >= v"1.3.0-DEV.573"
+                    Threads.@spawn remotecall(poolunref_owner, d.owner, d)
+                else
+                    @async remotecall(poolunref_owner, d.owner, d)
+                end
+            end
+        end
+    end
+end
+"Called on owner when a worker no longer holds any references to `d`."
+function poolunref_owner(d::DRef)
+    @assert haskey(datastore_counter, (d.owner,d.id)) "poolunref_owner called before any poolref_owner"
+    ctr = datastore_counter[(d.owner,d.id)]
+    atomic_sub!(ctr, 1)
+    if ctr[] <= 0
+        delete!(datastore_counter, (d.owner,d.id))
+        datastore_delete(d.id)
+    end
+end
 
 if VERSION >= v"1.3.0-DEV"
 with_datastore_lock(f) = lock(()->f(), datastore_lock[])

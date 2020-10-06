@@ -123,6 +123,27 @@ end
     #@test fetch(@spawnat 2 isempty(MemPool.datastore))
 end
 
+@testset "refcounting" begin
+    r1 = poolset([1,2],2)
+    key = (r1.owner,r1.id)
+    @test MemPool.local_datastore_counter[key][] == 1
+    @test !haskey(MemPool.datastore_counter, key)
+    @test fetch(@spawnat 2 MemPool.datastore_counter[key][]) == 2
+    poolref(r1)
+    @test MemPool.local_datastore_counter[key][] == 2
+    @test fetch(@spawnat 2 MemPool.datastore_counter[key][]) == 2
+    poolunref(r1)
+    @test MemPool.local_datastore_counter[key][] == 1
+    poolunref(r1)
+    @test !haskey(MemPool.local_datastore_counter, key)
+    yield() # force poolunref_owner to initiate on remote
+    @spawnat 2 GC.gc() # force owner to call finalizer
+    @test fetch(@spawnat 2 !haskey(MemPool.datastore_counter, key))
+    @test_throws KeyError poolget(r1)
+    @test_throws AssertionError poolunref(r1)
+    poolref(r1) # Necessary since we actually still hold a reference
+end
+
 @testset "movetodisk" begin
     ref = poolset([1,2], 2)
     fref = movetodisk(ref)
