@@ -149,6 +149,8 @@ function fixedlength(t::Type, cycles=IdDict())
         return sizeof(t)
     elseif isa(t, UnionAll) || isabstracttype(t) || Base.isbitsunion(t)
         return -1
+    elseif isa(t, Union) && Base.argument_datatype(t) === nothing
+        return -1
     end
 
     if haskey(cycles, t)

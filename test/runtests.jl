@@ -79,6 +79,11 @@ import Base: ==
     roundtrip([(Empty(),) for i=1:4])
 end
 
+@testset "Array{Union{Nothing,Vector}}" begin
+    roundtrip([nothing, Int[]])
+    @test MemPool.fixedlength(Union{Nothing,Vector{Int}}) == -1 # Issue #43.
+end
+
 #=
 @testset "lru" begin
     # clean up
