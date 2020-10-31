@@ -50,12 +50,12 @@ function poolref(d::DRef)
         ctr = get!(local_datastore_counter, (d.owner,d.id)) do
             # We've never seen this DRef, so tell the owner
             if d.owner == myid()
-                poolref_owner(d)
+                poolref_owner(d.id)
             else
                 @static if VERSION >= v"1.3.0-DEV.573"
-                    Threads.@spawn remotecall(poolref_owner, d.owner, d)
+                    Threads.@spawn remotecall(poolref_owner, d.owner, d.id)
                 else
-                    @async remotecall(poolref_owner, d.owner, d)
+                    @async remotecall(poolref_owner, d.owner, d.id)
                 end
             end
             Atomic{Int}(0)
@@ -63,10 +63,10 @@ function poolref(d::DRef)
         atomic_add!(ctr, 1)
     end
 end
-"Called on owner when a worker first holds a reference to `d`."
-function poolref_owner(d::DRef)
+"Called on owner when a worker first holds a reference to DRef ID `id`."
+function poolref_owner(id::Int)
     with_datastore_lock() do
-        ctr = get!(datastore_counter, (d.owner,d.id)) do
+        ctr = get!(datastore_counter, (myid(),id)) do
             Atomic{Int}(0)
         end
         atomic_add!(ctr, 1)
@@ -81,25 +81,26 @@ function poolunref(d::DRef)
             delete!(local_datastore_counter, (d.owner,d.id))
             # Tell the owner we hold no more references
             if d.owner == myid()
-                poolunref_owner(d)
+                poolunref_owner(d.id)
             else
                 @static if VERSION >= v"1.3.0-DEV.573"
-                    Threads.@spawn remotecall(poolunref_owner, d.owner, d)
+                    Threads.@spawn remotecall(poolunref_owner, d.owner, d.id)
                 else
-                    @async remotecall(poolunref_owner, d.owner, d)
+                    @async remotecall(poolunref_owner, d.owner, d.id)
                 end
             end
         end
     end
 end
-"Called on owner when a worker no longer holds any references to `d`."
-function poolunref_owner(d::DRef)
-    @assert haskey(datastore_counter, (d.owner,d.id)) "poolunref_owner called before any poolref_owner"
-    ctr = datastore_counter[(d.owner,d.id)]
+"Called on owner when a worker no longer holds any references to DRef ID `id`."
+function poolunref_owner(id::Int)
+    owner = myid()
+    @assert haskey(datastore_counter, (owner,id)) "poolunref_owner called before any poolref_owner"
+    ctr = datastore_counter[(owner,id)]
     atomic_sub!(ctr, 1)
     if ctr[] <= 0
-        delete!(datastore_counter, (d.owner,d.id))
-        datastore_delete(d.id)
+        delete!(datastore_counter, (owner,id))
+        datastore_delete(id)
     end
 end
 
