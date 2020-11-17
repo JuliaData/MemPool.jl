@@ -8,7 +8,7 @@ using Serialization, Random
 
 @everywhere using Sockets
 
-using MemPool
+@everywhere using MemPool
 using Test
 
 import Sockets: getipaddr
@@ -133,15 +133,16 @@ end
     key = (r1.owner,r1.id)
     @test MemPool.local_datastore_counter[key][] == 1
     @test !haskey(MemPool.datastore_counter, key)
-    @test fetch(@spawnat 2 MemPool.datastore_counter[key][]) == 2
+    @spawnat 2 GC.gc()
+    @test fetch(@spawnat 2 MemPool.datastore_counter[key][]) == 1
     poolref(r1)
     @test MemPool.local_datastore_counter[key][] == 2
-    @test fetch(@spawnat 2 MemPool.datastore_counter[key][]) == 2
+    @test fetch(@spawnat 2 MemPool.datastore_counter[key][]) == 1
     poolunref(r1)
     @test MemPool.local_datastore_counter[key][] == 1
     poolunref(r1)
     @test !haskey(MemPool.local_datastore_counter, key)
-    yield() # force poolunref_owner to initiate on remote
+    sleep(1) # allow poolunref_owner to initiate on remote
     @spawnat 2 GC.gc() # force owner to call finalizer
     @test fetch(@spawnat 2 !haskey(MemPool.datastore_counter, key))
     @test_throws KeyError poolget(r1)

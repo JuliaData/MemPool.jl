@@ -5,6 +5,7 @@ import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, pooldelete, destroyonevict,
        movetodisk, copytodisk, savetodisk, mmwrite, mmread, cleanup,
        deletefromdisk, poolref, poolunref
+import .Threads: ReentrantLock
 
 ## Wrapping-unwrapping of payloads:
 
@@ -47,6 +48,7 @@ end
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file, "r+"))
 
 include("io.jl")
+include("lock.jl")
 include("datastore.jl")
 
 """
@@ -105,8 +107,11 @@ function __init__()
     catch err
         global host = Sockets.localhost
     end
-    datastore_lock[] = ReentrantLock()
+    datastore_lock[] = NonReentrantLock()
     id_counter[] = Atomic{Int}(0)
+    atexit() do
+        exit_flag[] = true
+    end
 end
 
 end # module
