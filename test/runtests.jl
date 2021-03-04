@@ -69,6 +69,14 @@ end
     @test !isassigned(sa2, 2)
 end
 
+@testset "approx_size $(typeof(x))" for x in (
+    "foo~^å&",
+    SubString("aaaaa", 2),
+    Symbol("foo~^å&")
+)
+    @test MemPool.approx_size(x) == Base.summarysize(x)
+end
+
 mutable struct Empty
 end
 import Base: ==
