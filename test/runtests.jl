@@ -72,10 +72,14 @@ end
 @testset "approx_size $(typeof(x))" for x in (
     "foo~^å&",
     SubString("aaaaa", 2),
-    Symbol("foo~^å&")
 )
     @test MemPool.approx_size(x) == Base.summarysize(x)
 end
+@testset "approx_size Symbol" begin
+    s = Symbol("foo~^å&")
+    @test MemPool.approx_size(s) == Base.summarysize(String(s))
+end
+
 
 mutable struct Empty
 end

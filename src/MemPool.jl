@@ -101,11 +101,11 @@ function approx_size(xs::AbstractArray{String})
 end
 
 function approx_size(s::String) 
-    sizeof(s)+8
+    sizeof(s)+sizeof(Int) # sizeof(Int) for 64 bit vs 32 bit systems
 end
 
 function approx_size(s::Symbol) 
-    0
+    sizeof(s)+sizeof(Int)
 end
 
 function __init__()
