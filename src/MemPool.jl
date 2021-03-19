@@ -100,6 +100,14 @@ function approx_size(xs::AbstractArray{String})
     s + 4 * length(xs)
 end
 
+function approx_size(s::String) 
+    sizeof(s)+sizeof(Int) # sizeof(Int) for 64 bit vs 32 bit systems
+end
+
+function approx_size(s::Symbol) 
+    sizeof(s)+sizeof(Int)
+end
+
 function __init__()
     global session = "sess-" * randstring(5)
     try
