@@ -1,5 +1,4 @@
 ## datastore
-using Distributed
 
 mutable struct DRef
     owner::Int
@@ -23,7 +22,17 @@ function Serialization.serialize(io::AbstractSerializer, d::DRef)
     if pid != -1
         pooltransfer_send(d, pid)
     else
-        @warn "Couldn't determine destination for DRef serialization\nRefcounting will be broken"
+        pid = Distributed.worker_id_from_socket(io)
+        if pid != -1
+            pooltransfer_send(d, pid)
+        else
+            if io isa Distributed.ClusterSerializer
+                pooltransfer_send(d, io.pid)
+            else
+                @warn "Couldn't determine destination for DRef serialization\nRefcounting will be broken"
+                @async println(io)
+            end
+        end
     end
 end
 function Serialization.deserialize(io::AbstractSerializer, dt::Type{DRef})
@@ -210,7 +219,7 @@ end
 isinmemory(x::RefState) = x.data !== nothing
 isondisk(x::RefState) = x.file !== nothing
 
-function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
+function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing, network=DistributedNetwork())
     if pid == myid()
         id = atomic_add!(id_counter[], 1)
         #lru_free(size)
@@ -224,9 +233,9 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevi
         DRef(myid(), id, size)
     else
         # use our serialization
-        remotecall_fetch(pid, MMWrap(x)) do wx
+        remotecall_fetch(network, pid, MMWrap(x)) do wx
             # todo: try to evict here before deserializing...
-            poolset(unwrap_payload(wx), pid)
+            poolset(unwrap_payload(wx), pid; network=network)
         end
     end
 end
@@ -292,28 +301,28 @@ function get_workers_at(ip::IPv4)
     wrkrips[ip]
 end
 
-function poolget(r::FileRef)
+function poolget(r::FileRef; network=DistributedNetwork())
     # since loading a file is expensive, and often
     # requested in quick succession
     # we add the data to the pool
     if haskey(file_to_dref, r.file)
         ref = file_to_dref[r.file]
         if ref.owner == myid()
-            return poolget(ref)
+            return poolget(ref; network=network)
         end
     end
 
     if is_my_ip(r.host)
         x = unwrap_payload(open(deserialize, r.file, "r+"))
     else
-        x = remotecall_fetch(get_worker_at(r.host), r.file) do file
+        x = remotecall_fetch(network, get_worker_at(r.host), r.file) do file
             unwrap_payload(open(deserialize, file, "r+"))
         end
     end
-    dref = poolset(x, file=r.file, size=r.size)
+    dref = poolset(x, file=r.file, size=r.size; network=network)
     file_to_dref[r.file] = dref
     if enable_who_has_read[]
-        remotecall_fetch(1, dref) do dr
+        remotecall_fetch(network, 1, dref) do dr
             who_has = MemPool.who_has_read
             if !haskey(who_has, r.file)
                 who_has[r.file] = DRef[]
@@ -325,12 +334,12 @@ function poolget(r::FileRef)
     return x
 end
 
-function poolget(r::DRef)
+function poolget(r::DRef; network=DistributedNetwork())
     if r.owner == myid()
         _getlocal(r.id, false)
     else
         forwardkeyerror() do
-            remotecall_fetch(r.owner, r) do r
+            remotecall_fetch(network, r.owner, r) do r
                 MMWrap(_getlocal(r.id, true))
             end
         end

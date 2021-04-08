@@ -5,6 +5,7 @@ import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, pooldelete, destroyonevict,
        movetodisk, copytodisk, savetodisk, mmwrite, mmread, cleanup,
        deletefromdisk, poolref, poolunref
+using Distributed
 import .Threads: ReentrantLock
 
 ## Wrapping-unwrapping of payloads:
@@ -49,6 +50,7 @@ unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file, "r+"))
 
 include("io.jl")
 include("lock.jl")
+include("networks.jl")
 include("datastore.jl")
 
 """

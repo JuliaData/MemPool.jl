@@ -230,6 +230,27 @@ end
     @test MemPool.who_has_read[f][1].owner == 2
 end
 
+@testset "custom network" begin
+    rc = RemoteChannel(()->Channel(8))
+    @everywhere begin
+        struct MyNetwork end
+        function Distributed.remotecall_fetch(::MyNetwork, args...)
+            put!($rc, 1)
+            Distributed.remotecall_fetch(args...)
+        end
+        function Distributed.remotecall_fetch(f::Function, ::MyNetwork, args...)
+            put!($rc, 2)
+            Distributed.remotecall_fetch(f, args...)
+        end
+    end
+    ref = poolset([1,2,3], 2; network=MyNetwork())
+    @test poolget(ref; network=MyNetwork()) == [1,2,3]
+    # TODO: Test other method
+    @test take!(rc) == 2
+    @test take!(rc) == 2
+    @test !isready(rc)
+end
+
 @testset "cleanup" begin
     @everywhere MemPool.cleanup()
     d = MemPool.default_dir(myid())
