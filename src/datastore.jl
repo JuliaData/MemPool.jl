@@ -16,11 +16,13 @@ Base.:(==)(d1::DRef, d2::DRef) = (d1.owner == d2.owner) && (d1.id == d2.id)
 Base.hash(d::DRef, h::UInt) = hash(d.id, hash(d.owner, h))
 
 function Serialization.serialize(io::AbstractSerializer, d::DRef)
-    Serialization.serialize_cycle_header(io, d)
-    serialize(io, d.owner)
-    serialize(io, d.id)
-    serialize(io, d.size)
+    if !Serialization.serialize_cycle_header(io, d)
+        serialize(io, d.owner)
+        serialize(io, d.id)
+        serialize(io, d.size)
+    end
 
+    # TODO: This is terrible but apparently necessary
     pid = Distributed.worker_id_from_socket(io.io)
     if pid != -1
         pooltransfer_send(d, pid)
@@ -66,6 +68,31 @@ const local_datastore_counter = Dict{Tuple{Int,Int}, Atomic{Int}}()
 const send_datastore_counter = Dict{Tuple{Int,Int}, Dict{Int,Atomic{Int}}}()
 const recv_datastore_counter = Dict{Tuple{Int,Int}, Dict{Int,Atomic{Int}}}()
 const exit_flag = Ref{Bool}(false)
+
+function why_am_i_here(key::Tuple{Int,Int})
+    for w in vcat(1, workers())
+        fetch(@spawnat w begin
+            if w == key[1]
+                println("Counts from owner: $(datastore_counter[key][])")
+            end
+            if haskey(local_datastore_counter, key)
+                println("Preserved on $w locally: $(local_datastore_counter[key][])")
+            end
+            if haskey(send_datastore_counter, key)
+                println("Sent from $w:")
+                for to in keys(send_datastore_counter[key])
+                    println("  to $to: $(send_datastore_counter[key][to])")
+                end
+            end
+            if haskey(recv_datastore_counter, key)
+                println("Recv to $w:")
+                for from in keys(recv_datastore_counter[key])
+                    println("  from $from: $(recv_datastore_counter[key][from])")
+                end
+            end
+        end)
+    end
+end
 
 function canfree(id)
     owner = myid()
