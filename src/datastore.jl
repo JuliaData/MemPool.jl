@@ -13,11 +13,13 @@ mutable struct DRef
 end
 
 function Serialization.serialize(io::AbstractSerializer, d::DRef)
-    Serialization.serialize_cycle_header(io, d)
-    serialize(io, d.owner)
-    serialize(io, d.id)
-    serialize(io, d.size)
+    if !Serialization.serialize_cycle_header(io, d)
+        serialize(io, d.owner)
+        serialize(io, d.id)
+        serialize(io, d.size)
+    end
 
+    # TODO: This is terrible but apparently necessary
     pid = Distributed.worker_id_from_socket(io.io)
     if pid != -1
         pooltransfer_send(d, pid)
@@ -30,7 +32,6 @@ function Serialization.serialize(io::AbstractSerializer, d::DRef)
                 pooltransfer_send(d, io.pid)
             else
                 @warn "Couldn't determine destination for DRef serialization\nRefcounting will be broken"
-                @async println(io)
             end
         end
     end
