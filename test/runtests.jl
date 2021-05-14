@@ -122,6 +122,24 @@ end
 end
 =#
 
+@testset "DRef equality" begin
+    d1 = poolset(1)
+    iob = IOBuffer()
+    serialize(iob, d1)
+    seek(iob, 0)
+    d2 = deserialize(iob)
+    @test d1 == d2
+    @test hash(d1) == hash(d2)
+
+    d = Dict{DRef, Int}()
+    d[d1] = 1
+    @test haskey(d, d1)
+    @test haskey(d, d2)
+    @test d[d2] == 1
+
+    pooldelete(d1)
+end
+
 @testset "set-get-delete" begin
     r1 = poolset([1,2])
     r2 = poolset(["abc","def"], 2)
