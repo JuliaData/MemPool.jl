@@ -12,6 +12,8 @@ mutable struct DRef
         d
     end
 end
+Base.:(==)(d1::DRef, d2::DRef) = (d1.owner == d2.owner) && (d1.id == d2.id)
+Base.hash(d::DRef, h::UInt) = hash(d.id, hash(d.owner, h))
 
 function Serialization.serialize(io::AbstractSerializer, d::DRef)
     Serialization.serialize_cycle_header(io, d)
