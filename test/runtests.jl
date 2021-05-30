@@ -140,6 +140,15 @@ end
     pooldelete(d1)
 end
 
+@testset "DRef size" begin
+    struct MyStruct end
+    d1 = poolset(1)
+    d2 = poolset(MyStruct())
+    @test d1.size == sizeof(Int)
+    @test d2.size === nothing
+    pooldelete.((d1, d2))
+end
+
 @testset "set-get-delete" begin
     r1 = poolset([1,2])
     r2 = poolset(["abc","def"], 2)

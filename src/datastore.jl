@@ -4,7 +4,7 @@ using Distributed
 mutable struct DRef
     owner::Int
     id::Int
-    size::UInt
+    size::Union{UInt,Nothing}
     function DRef(owner, id, size)
         d = new(owner, id, size)
         poolref(d)
@@ -50,7 +50,7 @@ Base.copy(d::DRef) = deepcopy(d)
 Base.deepcopy(d::DRef) = DRef(d.owner, d.id, d.size)
 
 mutable struct RefState
-    size::UInt64
+    size::Union{UInt64, Nothing}
     data::Union{Some{Any}, Nothing}
     file::Union{String, Nothing}
     destroyonevict::Bool # if true, will be removed from memory
