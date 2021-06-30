@@ -22,11 +22,17 @@ end
 
 Base.unlock(nrl::NonReentrantLock) = unlock(nrl.rl)
 
+if VERSION >= v"1.7.0-DEV"
+# as of v1.7 locks in Base disable finalizers
+enable_finalizers(on::Bool) = nothing
+else
 # NonReentrantLock may be taken around code that might call the GC, which might
 # reenter through finalizers.  Avoid that by temporarily disabling finalizers
 # running concurrently on this thread.
 enable_finalizers(on::Bool) = ccall(:jl_gc_enable_finalizers, Cvoid,
                                     (Ptr{Cvoid}, Int32,), Core.getptls(), on)
+end
+
 macro safe_lock(l, ex)
     quote
         temp = $(esc(l))
