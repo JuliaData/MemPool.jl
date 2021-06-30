@@ -54,10 +54,11 @@ include("datastore.jl")
 """
 `approx_size(d)`
 
-Returns the size of `d` in bytes used for accounting in MemPool datastore.
+Returns the size of `d` in bytes used for accounting in MemPool datastore, or
+returns `nothing` if the size cannot be calculated efficiently.
 """
 function approx_size(@nospecialize(d))
-    Base.summarysize(d) # note: this is accurate but expensive
+    nothing # Skip size calculation
 end
 
 function approx_size(d::Union{Base.BitInteger, Float16, Float32, Float64})
@@ -86,7 +87,7 @@ function approx_size(T, L, d)
     elseif isempty(d)
         return 0
     else
-        return sum(approx_size(x) for x in d)
+        return sum(something(approx_size(x), 0) for x in d)
     end
 end
 
@@ -100,11 +101,11 @@ function approx_size(xs::AbstractArray{String})
     s + 4 * length(xs)
 end
 
-function approx_size(s::String) 
+function approx_size(s::String)
     sizeof(s)+sizeof(Int) # sizeof(Int) for 64 bit vs 32 bit systems
 end
 
-function approx_size(s::Symbol) 
+function approx_size(s::Symbol)
     sizeof(s)+sizeof(Int)
 end
 
