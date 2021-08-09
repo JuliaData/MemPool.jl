@@ -92,7 +92,7 @@ end
 # HACK: Force remote GC messages to be executed serially
 const SEND_QUEUE = Channel(typemax(Int))
 const SEND_TASK = Ref{Task}()
-function _enqueue_work(f, args...)
+function _enqueue_work(f, args...; gc_context=false)
     if !isassigned(SEND_TASK)
         SEND_TASK[] = @async begin
             while true
@@ -108,7 +108,20 @@ function _enqueue_work(f, args...)
             end
         end
     end
-    put!(SEND_QUEUE, (f, args))
+    if gc_context
+        while true
+            if trylock(SEND_QUEUE)
+                try
+                    put!(SEND_QUEUE, (f, args))
+                finally
+                    unlock(SEND_QUEUE)
+                    break
+                end
+            end
+        end
+    else
+        put!(SEND_QUEUE, (f, args))
+    end
 end
 
 function poolref(d::DRef, recv=false)
@@ -149,7 +162,7 @@ function poolunref(d::DRef, to_pid=0)
             transfers = get(send_datastore_counter, (d.owner,d.id), Dict{Int,Atomic{Int}}())
             delete!(send_datastore_counter, (d.owner,d.id))
             # Tell the owner we hold no more references
-            _enqueue_work(remotecall_wait, poolunref_owner, d.owner, d.id, transfers)
+            _enqueue_work(remotecall_wait, poolunref_owner, d.owner, d.id, transfers; gc_context=true)
         end
     end
 end
