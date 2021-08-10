@@ -113,9 +113,9 @@ function _enqueue_work(f, args...; gc_context=false)
             if trylock(SEND_QUEUE)
                 try
                     put!(SEND_QUEUE, (f, args))
+                    break
                 finally
                     unlock(SEND_QUEUE)
-                    break
                 end
             end
         end
