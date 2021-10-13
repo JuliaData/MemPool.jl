@@ -110,6 +110,7 @@ function _enqueue_work(f, args...; gc_context=false)
     end
     if gc_context
         while true
+            GC.safepoint()
             if trylock(SEND_QUEUE)
                 try
                     put!(SEND_QUEUE, (f, args))

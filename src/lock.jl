@@ -56,6 +56,7 @@ macro safe_lock_spin(l, ex)
         temp = $(esc(l))
         while !trylock(temp)
             # we can't yield here
+            GC.safepoint()
         end
         enable_finalizers(false) # retains compatibility with non-finalizer callers
         try
