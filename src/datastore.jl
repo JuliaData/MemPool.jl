@@ -155,7 +155,7 @@ function poolref_owner(id::Int)
 end
 function poolunref(d::DRef, to_pid=0)
     @assert haskey(local_datastore_counter, (d.owner,d.id)) "poolunref called before any poolref $(myid()): ($(d.owner),$(d.id))"
-    with_datastore_lock() do
+    @safe_lock_spin datastore_lock[] begin
         ctr = local_datastore_counter[(d.owner,d.id)]
         atomic_sub!(ctr, 1)
         if ctr[] == 0
@@ -215,7 +215,7 @@ end
 
 if VERSION >= v"1.3.0-DEV"
 function with_datastore_lock(f)
-    @safe_lock_spin datastore_lock[] begin
+    @safe_lock datastore_lock[] begin
         f()
     end
 end
