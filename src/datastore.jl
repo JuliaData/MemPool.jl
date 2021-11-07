@@ -203,15 +203,18 @@ end
 mutable struct SendQueue
     queue::Channel{Any}
     @atomic task::Union{Task,Nothing}
+    processing::Bool
 end
-const SEND_QUEUE = SendQueue(Channel(typemax(Int)), nothing)
+const SEND_QUEUE = SendQueue(Channel(typemax(Int)), nothing, false)
 function _enqueue_work(f, args...; gc_context=false)
     if SEND_QUEUE.task === nothing
         task = Task() do
             while true
                 try
                     work, _args = take!(SEND_QUEUE.queue)
+                    SEND_QUEUE.processing = true
                     work(_args...)
+                    SEND_QUEUE.processing = false
                 catch err
                     exit_flag[] && continue
                     err isa ProcessExitedException && continue # TODO: Remove proc from counters
@@ -348,12 +351,73 @@ isondisk(id::Int) =
 isinmemory(x::DRef) = isinmemory(x.id)
 isondisk(x::DRef) = isondisk(x.id)
 
+const MEM_RESERVED = Ref{UInt}(512 * (1024^2)) # Reserve 512MB of RAM for OS
+const MEM_RESERVE_LOCK = Threads.ReentrantLock()
+
+"""
+When called, ensures that at least `MEM_RESERVED[] + size` bytes are available
+to the OS. If there is not enough memory available, then a variety of calls to
+the GC are performed to free up memory until either the reservation limit is
+satisfied, or `max_sweeps` number of cycles have elapsed.
+"""
+function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=5)
+    sat_sub(x::T, y::T) where T = x < y ? zero(T) : x-y
+
+    # Check whether the OS is running tight on memory
+    sweep_ctr = 0
+    while true
+        with(QUERY_MEM_OVERRIDE => true) do
+            Int(storage_available(CPURAMResource())) - size < MEM_RESERVED[]
+        end || break
+
+        # We need more memory! Let's encourage the GC to clear some memory...
+        sweep_start = time_ns()
+        mem_used = with(QUERY_MEM_OVERRIDE => true) do
+            storage_utilized(CPURAMResource())
+        end
+        if sweep_ctr == 0
+            @debug "Not enough memory to continue! Sweeping up unused memory..."
+            GC.gc(false)
+        elseif sweep_ctr == 1
+            GC.gc(true)
+        else
+            @everywhere GC.gc(true)
+        end
+
+        # Let finalizers run
+        yield()
+
+        # Wait for send queue to clear
+        while SEND_QUEUE.processing
+            yield()
+        end
+
+        with(QUERY_MEM_OVERRIDE => true) do
+            mem_freed = sat_sub(mem_used, storage_utilized(CPURAMResource()))
+            @debug "Freed $(Base.format_bytes(mem_freed)) bytes, available: $(Base.format_bytes(storage_available(CPURAMResource())))"
+        end
+
+        sweep_ctr += 1
+        if sweep_ctr == max_sweeps
+            @debug "Made too many sweeps, bailing out..."
+            break
+        end
+    end
+    if sweep_ctr > 0
+        @debug "Swept for $sweep_ctr cycles"
+    end
+end
+
 function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
                  retain=false, restore=false,
                  device=GLOBAL_DEVICE[], leaf_device=initial_leaf_device(device),
                  tag=nothing, leaf_tag=Tag(),
                  destructor=nothing)
     if pid == myid()
+        if !restore
+            @lock MEM_RESERVE_LOCK ensure_memory_reserved(size)
+        end
+
         id = atomic_add!(id_counter, 1)
         sstate = if !restore
             StorageState(Some{Any}(x),
