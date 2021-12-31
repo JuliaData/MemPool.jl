@@ -15,6 +15,8 @@ end
 Base.:(==)(d1::DRef, d2::DRef) = (d1.owner == d2.owner) && (d1.id == d2.id)
 Base.hash(d::DRef, h::UInt) = hash(d.id, hash(d.owner, h))
 
+const DRefID = Tuple{Int,Int}
+
 function Serialization.serialize(io::AbstractSerializer, d::DRef)
     Serialization.serialize_cycle_header(io, d)
     serialize(io, d.owner)
@@ -49,11 +51,20 @@ end
 Base.copy(d::DRef) = deepcopy(d)
 Base.deepcopy(d::DRef) = DRef(d.owner, d.id, d.size)
 
+include("storage.jl")
+
 mutable struct RefState
     size::UInt64
     data::Union{Some{Any}, Nothing}
-    file::Union{String, Nothing}
+    file::Union{StorageState, Nothing}
     destroyonevict::Bool # if true, will be removed from memory
+end
+function readfromdevice(d::DRef)
+    if d.owner == myid()
+        readfromdevice(d.id)
+    else
+        remotecall_fetch(readfromdevice, d.owner, d.id)
+    end
 end
 
 using .Threads
@@ -61,10 +72,10 @@ using .Threads
 const datastore = Dict{Int,RefState}()
 const datastore_lock = Ref{Union{Nothing, NonReentrantLock}}(nothing)
 const id_counter = Ref{Union{Nothing, Atomic{Int}}}(nothing)
-const datastore_counter = Dict{Tuple{Int,Int}, Atomic{Int}}() # TODO: We don't need owner
-const local_datastore_counter = Dict{Tuple{Int,Int}, Atomic{Int}}()
-const send_datastore_counter = Dict{Tuple{Int,Int}, Dict{Int,Atomic{Int}}}()
-const recv_datastore_counter = Dict{Tuple{Int,Int}, Dict{Int,Atomic{Int}}}()
+const datastore_counter = Dict{DRefID, Atomic{Int}}() # TODO: We don't need owner
+const local_datastore_counter = Dict{DRefID, Atomic{Int}}()
+const send_datastore_counter = Dict{DRefID, Dict{Int,Atomic{Int}}}()
+const recv_datastore_counter = Dict{DRefID, Dict{Int,Atomic{Int}}}()
 const exit_flag = Ref{Bool}(false)
 
 function canfree(id)
@@ -102,8 +113,11 @@ function _enqueue_work(f, args...; gc_context=false)
                 catch err
                     exit_flag[] && continue
                     err isa ProcessExitedException && continue # TODO: Remove proc from counters
-                    println(stderr, "Error in enqueued work:")
-                    Base.showerror(stderr, err)
+                    iob = IOContext(IOBuffer(), :color=>true)
+                    println(iob, "Error in enqueued work:")
+                    Base.showerror(iob, err)
+                    seek(iob, 0)
+                    write(stderr, iob)
                 end
             end
         end
@@ -226,18 +240,36 @@ end
 isinmemory(x::RefState) = x.data !== nothing
 isondisk(x::RefState) = x.file !== nothing
 
-function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing)
+function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), destroyonevict=false, file=nothing, device=GLOBAL_DEVICE[])
     if pid == myid()
         id = atomic_add!(id_counter[], 1)
-        #lru_free(size)
         with_datastore_lock() do
             datastore[id] = RefState(size,
                                      Some{Any}(x),
-                                     file,
+                                     nothing,
                                      destroyonevict)
         end
-        #lru_touch(id, size)
-        DRef(myid(), id, size)
+        d = DRef(myid(), id, size)
+        if file !== nothing
+            rootdir = Sys.iswindows() ? "C:" : "/"
+            device = SerializationFileDevice(FilesystemResource(rootdir), file)
+            fref = FileRef(file, size)
+            with_datastore_lock() do
+                datastore[id].file = StorageState(device, fref)
+                device_map[id] = device
+            end
+            return d
+        end
+        with_datastore_lock() do
+            try
+                writetodevice!(device, id)
+                device_map[id] = device
+            catch err
+                datastore_delete(id)
+                rethrow(err)
+            end
+        end
+        d
     else
         # use our serialization
         remotecall_fetch(pid, MMWrap(x)) do wx
@@ -355,41 +387,24 @@ end
 
 function _getlocal(id, remote)
     state = with_datastore_lock(()->datastore[id])
-    if remote
-        if isondisk(state)
-            return FileRef(state.file, state.size)
-        elseif isinmemory(state)
-            #lru_touch(id, state.size)
-            return something(state.data)
-        end
-    else
-        # local
-        if isinmemory(state)
-            #lru_touch(id, state.size)
-            return something(state.data)
-        elseif isondisk(state)
-            # TODO: get memory mapped size and not count it as
-            # much as local process size
-            #lru_free(state.size)
-            data = unwrap_payload(open(deserialize, state.file, "r+"))
-            state.data = Some{Any}(data)
-            #lru_touch(id, state.size) # load back to memory
-            return data
-        end
+    device = device_map[id]
+    if isinmemory(state)
+        readfromdevice(device, id, false)
+        return something(state.data)
     end
-    error("ref id $id not found in memory or on disk!")
+    return readfromdevice(device, id, true)
 end
 
 function datastore_delete(id)
     state = haskey(datastore, id) ? datastore[id] : nothing
     (state === nothing) && return
-    if isondisk(state)
-        f = state.file
-        isfile(f) && rm(f; force=true)
+    if haskey(device_map, id)
+        device = device_map[id]
+        deletefromdevice!(device, id)
+        delete!(device_map, id)
     end
     # release
     state.data = nothing
-    #delete!(lru_order, id)
     haskey(datastore, id) && delete!(datastore, id)
     # TODO: maybe cleanup from the who_has_read list?
     nothing
@@ -433,13 +448,12 @@ function destroyonevict(r::DRef, flag::Bool=true)
     end
 end
 
-
 default_dir(p) = joinpath(".mempool", "$session-$p")
 default_path(r::DRef) = joinpath(default_dir(r.owner), string(r.id))
 
-function movetodisk(r::DRef, path=default_path(r), keepinmemory=false) 
+function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
     if r.owner != myid()
-        return remotecall_fetch(movetodisk, r.owner, r, path)
+        return remotecall_fetch(movetodisk, r.owner, r, path, keepinmemory)
     end
 
     mkpath(dirname(path))
@@ -453,14 +467,24 @@ function movetodisk(r::DRef, path=default_path(r), keepinmemory=false)
         datastore[r.id]
     end
     # XXX: is this OK??
-    s.file = path
+    rootdir = Sys.iswindows() ? "C:" : "/"
+    device = SerializationFileDevice(FilesystemResource(rootdir), path)
     fref = FileRef(path, r.size)
-    if !keepinmemory
-        s.data = nothing
-        #delete!(lru_order, r.id)
+    s.file = StorageState(device, fref)
+    with_datastore_lock() do
+        device_map[r.id] = device
     end
 
     return fref
+end
+function _writetodevice!(ref_id, device, handle, keepinmemory=true)
+    new_ref = StorageState(device, handle)
+    s = datastore[ref_id]
+    # TODO: Atomic cmpswap (need single field)
+    s.file = new_ref
+    if !keepinmemory
+        s.data = nothing
+    end
 end
 
 copytodisk(r::DRef, path=default_path(r)) = movetodisk(r, path, true)
@@ -488,60 +512,3 @@ function deletefromdisk(r::DRef, path)
         return remotecall_fetch(deletefromdisk, r.owner, r, path)
     end
 end
-
-#### LRU
-#
-#using DataStructures
-#
-#const max_memsize = Ref{UInt}(2^30)
-#const lru_order = OrderedDict{Int, UInt}()
-#
-## marks the ref as most recently used
-#function lru_touch(id::Int, sz = datastore[id].size)
-#    if haskey(lru_order, id)
-#	delete!(lru_order, id)
-#	lru_order[id] = sz
-#    else
-#	lru_order[id] = sz
-#    end
-#end
-#
-## returns ref ids that can be evicted to keep
-## space below max_memsize
-#function lru_evictable(required=0)
-#    total_size = UInt(sum(values(lru_order)) + required)
-#    if total_size <= max_memsize[]
-#	return Int[] # nothing to evict
-#    end
-#
-#    size_to_evict = total_size - max_memsize[]
-#    memsum = UInt(0)
-#    evictable = Int[]
-#
-#    for (k, v) in lru_order
-#	if total_size - memsum <= max_memsize[]
-#	    break
-#	end
-#	if datastore[k].destroyonevict # remove only recomputable chunks
-#	    memsum += v
-#	    push!(evictable, k)
-#	end
-#    end
-#    return evictable
-#end
-#
-#const spilltodisk = Ref(false)
-#
-#function lru_free(sz)
-#    list = lru_evictable(sz)
-#    for id in list
-#	state = datastore[id]
-#	ref = DRef(myid(), id, state.size)
-#	if state.destroyonevict
-#	    pooldelete(ref)
-#	else
-#	    !spilltodisk[] && continue
-#	    #movetodisk(ref)
-#	end
-#    end
-#end

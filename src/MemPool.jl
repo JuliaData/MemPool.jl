@@ -117,7 +117,18 @@ function __init__()
     end
     datastore_lock[] = NonReentrantLock()
     id_counter[] = Atomic{Int}(0)
+    if parse(Bool, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0"))
+        membound = parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3))))
+        diskpath = get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(tempdir(), ".mempool"))
+        rootdir = Sys.iswindows() ? "C:" : "/"
+        diskdevice = SerializationFileDevice(FilesystemResource(rootdir), diskpath)
+        diskbound = parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_BOUND", repr(32*(1024^3))))
+        GLOBAL_DEVICE[] = LRUAllocator(membound, diskdevice, diskbound)
+    end
     atexit() do
+        for id in keys(datastore)
+            datastore_delete(id)
+        end
         exit_flag[] = true
     end
 end

@@ -1,5 +1,7 @@
 include("testenv.jl")
 
+ENV["JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR"] = "0"
+
 if nprocs() == 1
     addprocs_with_testenv(2)
 end
@@ -12,8 +14,6 @@ using Serialization, Random
 using Test
 
 import Sockets: getipaddr
-
-#import MemPool: lru_touch, lru_evictable, mmwrite, mmread
 
 function roundtrip(x, eq=(==), io=IOBuffer())
     mmwrite(Serializer(io), x)
@@ -191,7 +191,6 @@ end
     @test fref2.file == f
     @test poolget(fref) == poolget(fref2)
     pooldelete(ref)
-    #@test fetch(@spawnat 2 isempty(MemPool.lru_order))
     @test fetch(@spawnat 2 isempty(MemPool.datastore))
 
     ref = poolset([1,2], 2)
@@ -206,11 +205,46 @@ end
     @test MemPool.is_my_ip(getipaddr())
 end
 
-inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datastore[id]), ref.owner, ref.id)
-#=
-@testset "lru free" begin
-    @everywhere MemPool.max_memsize[] = 8*10
-    @everywhere MemPool.spilltodisk[] = true
+@testset "SerializationFileDevice" begin
+    x1 = poolset([1,2,3])
+    state = MemPool.datastore[x1.id]
+    data = something(state.data)
+
+    sdevice = MemPool.SerializationFileDevice("testdata")
+    MemPool.setdevice!(sdevice, x1.id)
+    @test state.file !== nothing
+    sstate = state.file
+    @test sstate.device == sdevice
+    @test sstate.handle isa FileRef
+    path = sstate.handle.file
+    @test isdir("testdata")
+    @test isfile(path)
+    @test poolget(x1) == data
+    @test state.file !== nothing
+
+    MemPool.deletefromdevice!(MemPool.CPURAMDevice(), x1.id)
+    @test state.data === nothing
+    @test poolget(x1) == data
+    @test state.data !== nothing
+
+    MemPool.setdevice!(MemPool.CPURAMDevice(), x1)
+    @test !isfile(path)
+    @test state.data !== nothing
+    @test poolget(x1) == data
+
+    rm("testdata"; recursive=true)
+end
+
+inmem(ref) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datastore[id]), ref.owner, ref.id)
+lru_upper_refs(owner) = remotecall_fetch(() -> MemPool.GLOBAL_DEVICE[].mem_refs, owner)
+lru_lower_refs(owner) = remotecall_fetch(() -> MemPool.GLOBAL_DEVICE[].device_refs, owner)
+lru_upper_pos(ref) = findfirst(x->x==ref.id, lru_upper_refs(ref.owner))
+lru_lower_pos(ref) = findfirst(x->x==ref.id, lru_lower_refs(ref.owner))
+@testset "LRUAllocator" begin
+    old_alloc = MemPool.GLOBAL_DEVICE[]
+    alloc = MemPool.LRUAllocator(8*10,
+                                 MemPool.SerializationFileDevice(MemPool.default_dir(myid())), 8*10_000)
+    @everywhere MemPool.GLOBAL_DEVICE[] = $alloc
     r1 = poolset([1,2], 2)
     r2 = poolset([1,2,3], 2)
     r3 = poolset([1,2,3,4,5], 2)
@@ -223,22 +257,76 @@ inmem(ref, pid=myid()) = remotecall_fetch(id -> MemPool.isinmemory(MemPool.datas
     @test !inmem(r1)
     @test inmem(r2)
     @test inmem(r3)
-    poolget(r2) # make this less least recently used
+    @test lru_upper_pos(r4) == 1
+    @test lru_upper_pos(r3) == 2
+    @test lru_upper_pos(r2) == 3
+    @test lru_lower_pos(r1) == 1
+    @test lru_upper_pos(r1) === nothing
+    poolget(r2) # make this most recently used
+    @test poolget(r2) isa Vector
+    @test lru_upper_pos(r2) == 1
+    @test lru_upper_pos(r4) == 2
+    @test lru_upper_pos(r3) == 3
 
-    destroyonevict(r3)
+    #destroyonevict(r3)
     r5 = poolset([1,2],2)
-    @test_throws KeyError poolget(r3)
+    # equivalent to destroyonevict
+    r3_id = (r3.owner, r3.id)
+    r3 = nothing; GC.gc(); sleep(1); wait(@spawnat 2 GC.gc())
+    @test remotecall_fetch(id->!haskey(MemPool.datastore, id), r3_id[1], r3_id[2])
     @test inmem(r2)
+    @test lru_upper_pos(r2) == 2
 
     r6 = poolset([1,2],2)
     @test inmem(r2)
     @test inmem(r4)
 
-    map(poolget, [r1,r2,r4,r5,r6]) == [[1:2;], [1:3;], [1], [1:2;], [1:2;]]
-    map(pooldelete, [r1,r2,r4,r5,r6])
-    @everywhere MemPool.max_memsize[] = 2e9
+    # slightly bulky object
+    r7 = poolset(collect(1:11),2)
+    @test !inmem(r7) # immediate demotion
+    # existing refs not touched
+    @test all(inmem.([r2,r4,r5,r6]))
+    @test !inmem(r1)
+
+    upper_refs = lru_upper_refs(2)
+    lower_refs = lru_lower_refs(2)
+    # very bulky object
+    try
+        poolset(collect(1:10_001),2)
+        @test false
+    catch err
+        @test err.captured.ex isa ArgumentError
+    end
+    # failure to insert doesn't affect existing refs
+    @test lru_upper_refs(2) == upper_refs
+    @test lru_lower_refs(2) == lower_refs
+
+    # !inmem(r1)
+    # promote r1 to memory
+    @test poolget(r1) isa Vector
+    @test inmem(r1) == 1
+    @test all(inmem.([r2,r4,r5,r6]))
+    @test !inmem(r7)
+
+    r8 = poolset(collect(1:9_989),2)
+    # can still get swapped-in data
+    @test map(poolget, [r1,r2,r4,r5,r6]) == [[1:2;], [1:3;], [1], [1:2;], [1:2;]]
+    # bulky object can't migrate
+    try
+        poolget(r8)
+        @test false
+    catch err
+        @test err.captured.ex isa AssertionError
+    end
+    # can forcibly retrieve bulky objects (but we're hiding it from the allocator)
+    @test MemPool.readfromdevice(r7) == [1:11;]
+    @test MemPool.readfromdevice(r8) == [1:9_989;]
+
+    r1, r2, r4, r5, r6, r7, r8 = nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing
+    GC.gc(); sleep(1); wait(@spawnat 2 GC.gc())
+
+    @everywhere MemPool.GLOBAL_DEVICE[] = $old_alloc
 end
-=#
 
 @testset "who_has_read" begin
     f = tempname()
@@ -250,6 +338,13 @@ end
 
 @testset "cleanup" begin
     @everywhere MemPool.cleanup()
-    d = MemPool.default_dir(myid())
-    @test !isdir(d)
+    for w in [1, 2]
+        d = joinpath(@__DIR__, MemPool.default_dir(w))
+        if isdir(d)
+            @test isempty(readdir(d))
+            rm(d; recursive=true)
+        else
+            @test true
+        end
+    end
 end
