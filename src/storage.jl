@@ -1,9 +1,53 @@
+include("fsinfo.jl")
+
+"""
+    StorageResource
+
+The supertype for all storage resources. Any subtype represents some storage
+hardware or modality (RAM, disk, NAS, VRAM, tape, etc.) where data can be
+stored, and which has some current usage level and a maximum capacity (both
+measures in bytes).
+
+Storage resources are generally unique (although they may alias), and do not
+represent a method of storing/loading data to/from the resource; instead, a
+`StorageDevice` provides an actual implementation of such operations on one or
+more resources.
+"""
 abstract type StorageResource end
+storage_available(::StorageResource) = 0
+storage_capacity(::StorageResource) = 0
+storage_utilized(s::StorageResource) = storage_capacity(s) - storage_available(s)
 
+"Represents CPU RAM."
 struct CPURAMResource <: StorageResource end
+if Sys.islinux()
+function storage_available(::CPURAMResource)
+    open("/proc/meminfo", "r") do io
+        # skip first 2 lines
+        readline(io)
+        readline(io)
+        line = readline(io)
+        free = match(r"MemAvailable:\s*([0-9]*)\s.*", line).captures[1]
+        parse(UInt64, free) * 1024
+    end
+end
+else
+# FIXME: Sys.free_memory() includes OS caches
+storage_available(::CPURAMResource) = Sys.free_memory()
+end
+storage_capacity(::CPURAMResource) = Sys.total_memory()
 
+"Represents a filesystem mounted at a given path."
 struct FilesystemResource <: StorageResource
     mountpoint::String
+end
+function storage_available(s::FilesystemResource)
+    vfs = statvfs(s.mountpoint)
+    return vfs.f_bavail * vfs.f_bsize
+end
+function storage_capacity(s::FilesystemResource)
+    vfs = statvfs(s.mountpoint)
+    return vfs.f_blocks * vfs.f_bsize
 end
 
 """
@@ -25,6 +69,11 @@ example of how to implement an allocator.
 """
 abstract type StorageDevice end
 
+# TODO: Docstrings
+storage_available(dev::StorageDevice) = sum(res->storage_available(dev, res), storage_resources(dev))
+storage_capacity(dev::StorageDevice) = sum(res->storage_capacity(dev, res), storage_resources(dev))
+storage_utilized(dev::StorageDevice) = sum(res->storage_utilized(dev, res), storage_resources(dev))
+
 "Returns the storage handle referring to the data contained in reference `id`."
 storage_handle(id::Int) = (datastore[id].file::StorageState).handle
 
@@ -36,6 +85,11 @@ function storage_device(id::Int)
     end
     (rstate.file::StorageState).device
 end
+storage_device(ref::DRef) =
+    (@assert ref.owner == myid(); storage_device(ref.id))
+
+"Returns the size of the data for reference `id`."
+storage_size(id::Int) = datastore[id].size
 
 """
     writetodevice!(device::StorageDevice, id::Int)
@@ -77,11 +131,37 @@ data.
 deletefromdevice!
 
 """
+    externally_varying(device::StorageDevice) -> Bool
+
+Indicates whether the storage availability or capacity of device `device may
+vary according to external forces, such as other unrelated processes or OS
+behavior.
+
+When `true`, this implies that the ability of `device to store data is
+completely arbitrary. Typically this means that calls to storage availability
+queries can return different results, even if no storage calls have been made
+on `device.
+
+When `false`, it may be reasonable to assume that exact accounting of storage
+availability is possible, although it is not guaranteed. There are also no
+guarantees that allocations will not trigger forced OS memory reclamation (such
+as by the Linux OOM killer).
+"""
+externally_varying(::StorageDevice) = true
+
+"""
     CPURAMDevice <: StorageDevice
 
 Stores data in memory. This is the default device.
 """
 struct CPURAMDevice <: StorageDevice end
+storage_resources(dev::CPURAMDevice) = Set{StorageResource}(CPURAMResource())
+storage_capacity(::CPURAMDevice, res::CPURAMResource) = storage_capacity(res)
+storage_capacity(::CPURAMDevice) = storage_capacity(CPURAMResource())
+storage_available(::CPURAMDevice, res::CPURAMResource) = storage_available(res)
+storage_available(::CPURAMDevice) = storage_available(CPURAMResource())
+storage_utilized(::CPURAMDevice, res::CPURAMResource) = storage_utilized(res)
+storage_utilized(::CPURAMDevice) = storage_utilized(CPURAMResource())
 function writetodevice!(device::CPURAMDevice, ref_id)
     s = datastore[ref_id]
     if !isinmemory(s)
@@ -111,6 +191,17 @@ SerializationFileDevice(dir) =
     SerializationFileDevice(FilesystemResource(Sys.iswindows() ? "C:" : "/"), dir)
 SerializationFileDevice() =
     SerializationFileDevice(joinpath(tempdir(), ".mempool"))
+storage_resources(dev::SerializationFileDevice) = Set{StorageResource}([dev.fs])
+function storage_capacity(dev::SerializationFileDevice, res::FilesystemResource)
+    @assert res == dev.fs
+    storage_capacity(res)
+end
+storage_capacity(dev::SerializationFileDevice) = storage_capacity(dev.fs)
+function storage_available(dev::SerializationFileDevice, res::FilesystemResource)
+    @assert res == dev.fs
+    storage_available(res)
+end
+storage_available(dev::SerializationFileDevice) = storage_available(dev.fs)
 function writetodevice!(device::SerializationFileDevice, ref_id)
     mkpath(device.dir)
     path = tempname(device.dir; cleanup=false)
@@ -165,6 +256,34 @@ struct LRUAllocator <: StorageDevice
 end
 LRUAllocator(mem_limit, device, device_limit) =
     LRUAllocator(mem_limit, device, device_limit, Int[], Int[])
+storage_resources(lru::LRUAllocator) =
+    Set{StorageResource}([CPURAMResource(), lru.device])
+function storage_capacity(lru::LRUAllocator, res::StorageResource)
+    if res isa CPURAMResource
+        return lru.mem_limit
+    elseif res in storage_resources(lru.device)
+        return lru.device_limit
+    else
+        throw(ArgumentError("$res not contained in $lru"))
+    end
+end
+storage_capacity(lru::LRUAllocator) = lru.mem_limit + lru.device_limit
+storage_available(lru::LRUAllocator, res::StorageResource) =
+    storage_capacity(lru, res) - storage_utilized(lru, res)
+storage_available(lru::LRUAllocator) =
+    storage_capacity(lru) - storage_utilized(lru)
+function storage_utilized(lru::LRUAllocator, res::StorageResource)
+    if res isa CPURAMResource
+        return sum(map(storage_size, lru.mem_refs))
+    elseif res in storage_resources(lru.device)
+        return sum(map(storage_size, lru.device_refs))
+    else
+        throw(ArgumentError("$res not contained in $lru"))
+    end
+end
+storage_utilized(lru::LRUAllocator) =
+    sum(map(storage_size, lru.mem_refs)) +
+    sum(map(storage_size, lru.device_refs))
 function writetodevice!(lru::LRUAllocator, ref_id)
     ref_state = datastore[ref_id]
     if ref_state.size > lru.mem_limit
@@ -261,6 +380,7 @@ function deletefromdevice!(lru::LRUAllocator, id)
         deleteat!(lru.device_refs, idx)
     end
 end
+externally_varying(::LRUAllocator) = false
 
 function setdevice!(device::StorageDevice, id)
     old_device = device_map[id]
