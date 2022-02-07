@@ -1,4 +1,4 @@
-@static if Sys.isunix()
+if Sys.isunix()
 
 struct StatFSStruct
     f_bsize::Culong
@@ -26,6 +26,14 @@ function statvfs(path::String)
     end
 end
 
+function disk_stats(path::String)
+    vfs = statvfs(path)
+    return (
+        available = vfs.f_bavail * vfs.f_bsize,
+        capacity = vfs.f_blocks * vfs.f_bsize
+    )
+end
+
 struct MntEntStruct
     mnt_fsname::Cstring
     mnt_dir::Cstring
@@ -43,7 +51,7 @@ struct MntEntry
     mnt_passno::Cint
 end
 
-function getmounts(path::String="/etc/fstab")
+function mountpoints(;fstab::String="/etc/fstab")
     bufs = MntEntry[]
     mnt = ccall(:setmntent, Ptr{Cvoid}, (Cstring, Cstring), path, "r")
     Base.systemerror("Failed to setmntent at $path", UInt64(mnt) == 0)
@@ -64,8 +72,35 @@ function getmounts(path::String="/etc/fstab")
     bufs
 end
 
+elseif Sys.iswindows()
+
+function disk_stats(path::String)
+    lpDirectoryName = path
+    lpFreeBytesAvailableToCaller = Ref{Int64}(0)
+    lpTotalNumberOfBytes = Ref{Int64}(0)
+    lpTotalNumberOfFreeBytes = Ref{Int64}(0)
+
+    r = ccall(
+        (:GetDiskFreeSpaceExA, "kernel32"), Bool,
+        (Cstring, Ref{Int64}, Ref{Int64}, Ref{Int64}),
+        lpDirectoryName,
+        lpFreeBytesAvailableToCaller,
+        lpTotalNumberOfBytes,
+        lpTotalNumberOfFreeBytes
+    )
+    @assert r "Failed to query disk stats of $path"
+
+    return (
+        available = lpFreeBytesAvailableToCaller[],
+        capacity = lpTotalNumberOfBytes[]
+    )
+end
+
+# TODO: mountpoints
+
 else
 
+# FIXME
 error("Not implemented yet")
 
 end

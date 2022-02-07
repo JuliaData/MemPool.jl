@@ -41,14 +41,8 @@ storage_capacity(::CPURAMResource) = Sys.total_memory()
 struct FilesystemResource <: StorageResource
     mountpoint::String
 end
-function storage_available(s::FilesystemResource)
-    vfs = statvfs(s.mountpoint)
-    return vfs.f_bavail * vfs.f_bsize
-end
-function storage_capacity(s::FilesystemResource)
-    vfs = statvfs(s.mountpoint)
-    return vfs.f_blocks * vfs.f_bsize
-end
+storage_available(s::FilesystemResource) = disk_stats(s.mountpoint).available
+storage_capacity(s::FilesystemResource) = disk_stats(s.mountpoint).capacity
 
 """
     StorageDevice
