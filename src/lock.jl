@@ -67,3 +67,19 @@ macro safe_lock_spin(l, ex)
         end
     end
 end
+
+"""
+    with_lock(f, lock, cond=true)
+
+Conditionally take lock `lock`, execute `f`, and unlock `lock`. If `!cond`,
+then `lock` is not taken or released.
+"""
+function with_lock(f, lock, cond=true)
+    if cond
+        @safe_lock lock begin
+            f()
+        end
+    else
+        f()
+    end
+end

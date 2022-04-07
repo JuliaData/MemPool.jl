@@ -51,10 +51,10 @@ struct MntEntry
     mnt_passno::Cint
 end
 
-function mountpoints(;fstab::String="/etc/fstab")
+function getmntent(;fstab::String="/etc/fstab")
     bufs = MntEntry[]
-    mnt = ccall(:setmntent, Ptr{Cvoid}, (Cstring, Cstring), path, "r")
-    Base.systemerror("Failed to setmntent at $path", UInt64(mnt) == 0)
+    mnt = ccall(:setmntent, Ptr{Cvoid}, (Cstring, Cstring), fstab, "r")
+    Base.systemerror("Failed to setmntent at $fstab", UInt64(mnt) == 0)
     while true
         ret = ccall(:getmntent, Ptr{MntEntStruct}, (Ptr{Cvoid},), mnt)
         UInt64(ret) == 0 && break
@@ -71,6 +71,7 @@ function mountpoints(;fstab::String="/etc/fstab")
     ccall(:endmntent, Cvoid, (Ptr{Cvoid},), mnt)
     bufs
 end
+mountpoints() = map(mnt->mnt.mnt_dir, getmntent())
 
 elseif Sys.iswindows()
 
@@ -96,11 +97,27 @@ function disk_stats(path::String)
     )
 end
 
-# TODO: mountpoints
+function mountpoints()
+    mounts = String[]
+    path = Libc.malloc(256)
+    mnt = ccall((:FindFirstVolumeW, "kernel32"), Ptr{Cvoid},
+                (Ptr{Cvoid}, Int), path, 256)
+    Base.systemerror("Failed to FindFirstVolumeW at $path", UInt64(mnt) == 0)
+    push!(mounts, unsafe_string(reinterpret(Cstring, path)))
+    while true
+        ret = ccall((:FindNextVolumeW, "kernel32"), Bool,
+                    (Ptr{Cvoid}, Ptr{Cvoid}, Int), mnt, path, 256)
+        ret || break
+        push!(mounts, unsafe_string(reinterpret(Cstring, path)))
+    end
+    ccall((:FindVolumeClose, "kernel32"), Cvoid, (Ptr{Cvoid},), mnt)
+    Libc.free(path)
+    mounts
+end
 
 else
 
-# FIXME
-error("Not implemented yet")
+mountpoints() = error("Not implemented yet")
+disk_stats(path::String) = error("Not implemented yet")
 
 end
