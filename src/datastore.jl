@@ -140,7 +140,7 @@ function _enqueue_work(f, args...; gc_context=false)
                     iob = IOContext(IOBuffer(), :color=>true)
                     println(iob, "Error in enqueued work:")
                     Base.showerror(iob, err)
-                    seek(iob, 0)
+                    seek(iob.io, 0)
                     write(stderr, iob)
                 end
             end
