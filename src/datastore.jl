@@ -125,16 +125,28 @@ function _enqueue_work(f, args...; gc_context=false)
     end
 end
 
+const remotecall_wait_fast = remotecall_wait
+#=
+@inline function remotecall_wait_fast(f, id::Int, args...; kwargs...)
+    @nospecialize f args kwargs
+    if id == myid()
+        f(args...; kwargs...)
+    else
+        remotecall_wait(f, id, args...; kwargs...)
+    end
+end
+=#
+
 function poolref(d::DRef, recv=false)
     with_datastore_lock() do
         ctr = get!(local_datastore_counter, (d.owner,d.id)) do
             # We've never seen this DRef, so tell the owner
-            _enqueue_work(remotecall_wait, poolref_owner, d.owner, d.id)
+            _enqueue_work(remotecall_wait_fast, poolref_owner, d.owner, d.id)
             Atomic{Int}(0)
         end
         # We've received this DRef via transfer
         if recv
-            _enqueue_work(remotecall_wait, pooltransfer_recv, d.owner, d.id, myid())
+            _enqueue_work(remotecall_wait_fast, pooltransfer_recv, d.owner, d.id, myid())
         end
         # Update the local refcount
         atomic_add!(ctr, 1)
@@ -163,7 +175,7 @@ function poolunref(d::DRef, to_pid=0)
             transfers = get(send_datastore_counter, (d.owner,d.id), Dict{Int,Atomic{Int}}())
             delete!(send_datastore_counter, (d.owner,d.id))
             # Tell the owner we hold no more references
-            _enqueue_work(remotecall_wait, poolunref_owner, d.owner, d.id, transfers; gc_context=true)
+            _enqueue_work(remotecall_wait_fast, poolunref_owner, d.owner, d.id, transfers; gc_context=true)
         end
     end
 end
