@@ -1,5 +1,6 @@
 if Sys.isunix()
 
+if !isdefined(Base, :diskstat)
 struct StatFSStruct
     f_bsize::Culong
     f_frsize::Culong
@@ -33,6 +34,7 @@ function disk_stats(path::String)
         capacity = vfs.f_blocks * vfs.f_bsize
     )
 end
+end # diskstat
 
 struct MntEntStruct
     mnt_fsname::Cstring
@@ -75,6 +77,7 @@ mountpoints() = map(mnt->mnt.mnt_dir, getmntent())
 
 elseif Sys.iswindows()
 
+if !isdefined(Base, :diskstat)
 function disk_stats(path::String)
     lpDirectoryName = path
     lpFreeBytesAvailableToCaller = Ref{Int64}(0)
@@ -96,6 +99,7 @@ function disk_stats(path::String)
         capacity = lpTotalNumberOfBytes[]
     )
 end
+end # diskstat
 
 function mountpoints()
     mounts = String[]
@@ -118,6 +122,16 @@ end
 else
 
 mountpoints() = error("Not implemented yet")
+if !isdefined(Base, :diskstat)
 disk_stats(path::String) = error("Not implemented yet")
+end
 
+end
+
+if isdefined(Base, :diskstat)
+function disk_stats(path::String)
+    stats = Base.diskstat(path)
+    return (available=stats.available,
+            capacity=stats.total)
+end
 end
