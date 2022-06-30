@@ -2,7 +2,7 @@ module MemPool
 
 using Serialization, Sockets, Random
 import Serialization: serialize, deserialize
-export DRef, FileRef, poolset, poolget, pooldelete, destroyonevict,
+export DRef, FileRef, poolset, poolget, pooldelete,
        movetodisk, copytodisk, savetodisk, mmwrite, mmread, cleanup,
        deletefromdisk, poolref, poolunref
 import .Threads: ReentrantLock
@@ -109,16 +109,56 @@ function approx_size(s::Symbol)
 end
 
 function __init__()
-    global session = "sess-" * randstring(5)
+    global session = "sess-" * randstring(6)
     try
         global host = getipaddr()
     catch err
         global host = Sockets.localhost
     end
-    datastore_lock[] = NonReentrantLock()
-    id_counter[] = Atomic{Int}(0)
+    if parse(Bool, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0"))
+        membound = parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3))))
+        diskpath = get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(default_dir(), randstring(6)))
+        diskdevice = SerializationFileDevice(FilesystemResource(), diskpath)
+        diskbound = parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_BOUND", repr(32*(1024^3))))
+        kind = get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_ALLOCATOR_KIND", "MRU")
+        if !(kind in ("LRU", "MRU"))
+            @warn "Unknown allocator kind: $kind\nDefaulting to MRU"
+            kind = "MRU"
+        end
+        GLOBAL_DEVICE[] = SimpleRecencyAllocator(membound, diskdevice, diskbound, Symbol(kind))
+    end
+
+    # Ensure we cleanup all references
     atexit() do
         exit_flag[] = true
+        kill_counter = 10
+        empty!(file_to_dref)
+        empty!(who_has_read)
+        while kill_counter > 0 && with_lock(()->!isempty(datastore), datastore_lock)
+            GC.gc()
+            sleep(1)
+            kill_counter -= 1
+        end
+        with_lock(datastore_lock) do
+            if length(datastore) > 0
+                @warn "Failed to cleanup datastore after 10 seconds\nForcibly evicting all entries"
+                for id in collect(keys(datastore))
+                    state = MemPool.datastore[id]
+                    device = storage_read(state).root
+                    if device !== nothing
+                        @debug "Evicting ref $id with device $device"
+                        try
+                            delete_from_device!(device, state, id)
+                        catch
+                        end
+                    end
+                    delete!(MemPool.datastore, id)
+                end
+            end
+        end
+        if ispath(default_dir())
+            rm(default_dir(); recursive=true)
+        end
     end
 end
 
