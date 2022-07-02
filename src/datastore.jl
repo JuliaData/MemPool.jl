@@ -503,11 +503,11 @@ function _getlocal(id, remote)
 end
 
 function datastore_delete(id; force=false)
-    with_lock(datastore_counters_lock) do
+    @safe_lock_spin datastore_counters_lock begin
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-- (", myid(), ", ", id, ") with ", string(datastore_counters[(myid(), id)]), "\n"; gc_context=true)
         delete!(datastore_counters, (myid(), id))
     end
-    state = with_lock(datastore_lock) do
+    state = @safe_lock_spin datastore_lock begin
         haskey(datastore, id) ? datastore[id] : nothing
     end
     (state === nothing) && return
@@ -515,7 +515,7 @@ function datastore_delete(id; force=false)
     if device !== nothing
         errormonitor(Threads.@spawn delete_from_device!(device, state, id))
     end
-    with_lock(datastore_lock) do
+    @safe_lock_spin datastore_lock begin
         haskey(datastore, id) && delete!(datastore, id)
     end
     # TODO: maybe cleanup from the who_has_read list?
