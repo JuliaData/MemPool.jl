@@ -129,11 +129,14 @@ function __init__()
     end
 
     # Ensure we cleanup all references
+    evict_delay = something(tryparse(Int, get(ENV, "JULIA_MEMPOOL_EXIT_EVICT_DELAY", "0")), 0)
     atexit() do
         exit_flag[] = true
-        kill_counter = 10
+        kill_counter = evict_delay
         empty!(file_to_dref)
         empty!(who_has_read)
+        GC.gc()
+        yield()
         while kill_counter > 0 && with_lock(()->!isempty(datastore), datastore_lock)
             GC.gc()
             sleep(1)
@@ -141,7 +144,7 @@ function __init__()
         end
         with_lock(datastore_lock) do
             if length(datastore) > 0
-                @warn "Failed to cleanup datastore after 10 seconds\nForcibly evicting all entries"
+                @debug "Failed to cleanup datastore after $evict_delay seconds\nForcibly evicting all entries"
                 for id in collect(keys(datastore))
                     state = MemPool.datastore[id]
                     device = storage_read(state).root
