@@ -100,12 +100,79 @@ function approx_size(xs::AbstractArray{String})
     s + 4 * length(xs)
 end
 
-function approx_size(s::String) 
+function approx_size(s::String)
     sizeof(s)+sizeof(Int) # sizeof(Int) for 64 bit vs 32 bit systems
 end
 
-function approx_size(s::Symbol) 
+function approx_size(s::Symbol)
     sizeof(s)+sizeof(Int)
+end
+
+struct DiskCacheConfig
+    toggle::Bool
+    membound::Int
+    diskpath::AbstractString
+    diskdevice::StorageDevice
+    diskbound::Int
+    allocator_type::AbstractString
+    evict_delay::Int
+end
+
+function DiskCacheConfig(;
+    toggle::Bool=false,
+    membound::Union{Nothing,Int}=nothing,
+    diskpath::Union{Nothing,AbstractString}=nothing,
+    diskdevice::Union{Nothing,StorageDevice}=nothing,
+    diskbound::Union{Nothing,Int}=nothing,
+    allocator_type::Union{Nothing,AbstractString}=nothing,
+    evict_delay::Union{Nothing,Int}=nothing,
+)
+    toggle = something(toggle, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0"))
+    membound = something(membound, parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3)))))
+    diskpath = something(diskpath, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(default_dir(), randstring(6))))
+    diskdevice = something(diskdevice, SerializationFileDevice(FilesystemResource(), diskpath))
+    diskbound = something(diskbound, parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_BOUND", repr(32*(1024^3)))))
+    allocator_type = something(allocator_type, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_ALLOCATOR_KIND", "MRU"))
+    evict_delay = something(evict_delay, parse(Int, get(ENV, "JULIA_MEMPOOL_EXIT_EVICT_DELAY", "0")))
+
+    allocator_type ∉ ("LRU", "MRU") && throw(ArgumentError("Unknown allocator kind: $allocator_type. Available types: LRU, MRU"))
+
+    return DiskCacheConfig(
+        toggle,
+        membound,
+        diskpath,
+        diskdevice,
+        diskbound,
+        allocator_type,
+        evict_delay,
+    )
+end
+
+# TODO: we should have deconstruct functions for storage devices
+deconstruct_global_device(::StorageDevice) = nothing
+
+function setup_global_device!(cfg::DiskCacheConfig)
+    if !cfg.toggle
+        return nothing
+    end
+    if !isa(GLOBAL_DEVICE[],  CPURAMDevice)
+        # This detects if a disk cache was already set up
+        @warn(
+            "Setting the disk cache config when one is already set will lead to " *
+            "unexpected behavior and likely cause issues. Please restart the process" *
+            "before changing the disk cache configuration."
+        )
+    end
+
+    deconstruct_global_device(GLOBAL_DEVICE[])
+
+    GLOBAL_DEVICE[] = SimpleRecencyAllocator(
+        cfg.membound,
+        cfg.diskdevice,
+        cfg.diskbound,
+        Symbol(cfg.allocator_type),
+    )
+    return nothing
 end
 
 function __init__()
@@ -115,18 +182,12 @@ function __init__()
     catch err
         global host = Sockets.localhost
     end
-    if parse(Bool, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0"))
-        membound = parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3))))
-        diskpath = get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(default_dir(), randstring(6)))
-        diskdevice = SerializationFileDevice(FilesystemResource(), diskpath)
-        diskbound = parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_BOUND", repr(32*(1024^3))))
-        kind = get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_ALLOCATOR_KIND", "MRU")
-        if !(kind in ("LRU", "MRU"))
-            @warn "Unknown allocator kind: $kind\nDefaulting to MRU"
-            kind = "MRU"
-        end
-        GLOBAL_DEVICE[] = SimpleRecencyAllocator(membound, diskdevice, diskbound, Symbol(kind))
-    end
+
+    diskcache_config = DiskCacheConfig()
+
+
+    setup_global_device!(diskcache_config)
+
 
     # Ensure we cleanup all references
     atexit(exit_hook)
