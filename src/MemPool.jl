@@ -43,16 +43,27 @@ struct FileRef
     function FileRef(file, size; pid=nothing)
         new(host, file, size, Ref{Union{Int, Nothing}}(pid))
     end
+    function FileRef(file; pid=nothing)
+        size = try
+            UInt(Base.stat(file).size)
+        catch err
+            @debug "Failed to query FileRef size of $file"
+            UInt(0)
+        end
+        new(host, file, size, Ref{Union{Int, Nothing}}(pid))
+    end
 end
 
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file, "r+"))
+
+approx_size(f::FileRef) = f.size
 
 include("io.jl")
 include("lock.jl")
 include("datastore.jl")
 
 """
-`approx_size(d)`
+    approx_size(d)
 
 Returns the size of `d` in bytes used for accounting in MemPool datastore.
 """
