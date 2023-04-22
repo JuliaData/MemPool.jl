@@ -129,40 +129,42 @@ function __init__()
     end
 
     # Ensure we cleanup all references
-    evict_delay = something(tryparse(Int, get(ENV, "JULIA_MEMPOOL_EXIT_EVICT_DELAY", "0")), 0)
-    atexit() do
-        exit_flag[] = true
-        kill_counter = evict_delay
-        empty!(file_to_dref)
-        empty!(who_has_read)
+    atexit(exit_hook)
+end
+function exit_hook()
+    exit_flag[] = true
+    evict_delay = something(tryparse(Int, get(ENV, "JULIA_MEMPOOL_EXIT_EVICT_DELAY", "0")), 0)::Int
+    kill_counter = evict_delay
+    empty!(file_to_dref)
+    empty!(who_has_read)
+    GC.gc()
+    yield()
+    while kill_counter > 0 && with_lock(()->!isempty(datastore), datastore_lock)
         GC.gc()
-        yield()
-        while kill_counter > 0 && with_lock(()->!isempty(datastore), datastore_lock)
-            GC.gc()
-            sleep(1)
-            kill_counter -= 1
-        end
-        with_lock(datastore_lock) do
-            if length(datastore) > 0
-                @debug "Failed to cleanup datastore after $evict_delay seconds\nForcibly evicting all entries"
-                for id in collect(keys(datastore))
-                    state = MemPool.datastore[id]
-                    device = storage_read(state).root
-                    if device !== nothing
-                        @debug "Evicting ref $id with device $device"
-                        try
-                            delete_from_device!(device, state, id)
-                        catch
-                        end
+        sleep(1)
+        kill_counter -= 1
+    end
+    with_lock(datastore_lock) do
+        if length(datastore) > 0
+            @debug "Failed to cleanup datastore after $evict_delay seconds\nForcibly evicting all entries"
+            for id in collect(keys(datastore))
+                state = MemPool.datastore[id]
+                device = storage_read(state).root
+                if device !== nothing
+                    @debug "Evicting ref $id with device $device"
+                    try
+                        delete_from_device!(device, state, id)
+                    catch
                     end
-                    delete!(MemPool.datastore, id)
                 end
+                delete!(MemPool.datastore, id)
             end
         end
-        if ispath(default_dir())
-            rm(default_dir(); recursive=true)
-        end
+    end
+    if ispath(default_dir())
+        rm(default_dir(); recursive=true)
     end
 end
+precompile(exit_hook, ())
 
 end # module
