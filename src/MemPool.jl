@@ -127,7 +127,7 @@ function DiskCacheConfig(;
     allocator_type::Union{Nothing,AbstractString}=nothing,
     evict_delay::Union{Nothing,Int}=nothing,
 )
-    toggle = something(toggle, tryparse(Bool,get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0")))
+    toggle = something(toggle, parse(Bool, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0")))
     membound = something(membound, parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3)))))
     diskpath = something(diskpath, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(default_dir(), randstring(6))))
     diskdevice = something(diskdevice, SerializationFileDevice(FilesystemResource(), diskpath))
