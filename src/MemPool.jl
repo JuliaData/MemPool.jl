@@ -108,72 +108,7 @@ function approx_size(s::Symbol)
     sizeof(s)+sizeof(Int)
 end
 
-struct DiskCacheConfig
-    toggle::Bool
-    membound::Int
-    diskpath::AbstractString
-    diskdevice::StorageDevice
-    diskbound::Int
-    allocator_type::AbstractString
-    evict_delay::Int
-end
-
-function DiskCacheConfig(;
-    toggle::Union{Nothing,Bool}=nothing,
-    membound::Union{Nothing,Int}=nothing,
-    diskpath::Union{Nothing,AbstractString}=nothing,
-    diskdevice::Union{Nothing,StorageDevice}=nothing,
-    diskbound::Union{Nothing,Int}=nothing,
-    allocator_type::Union{Nothing,AbstractString}=nothing,
-    evict_delay::Union{Nothing,Int}=nothing,
-)
-    toggle = something(toggle, parse(Bool, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0")))
-    membound = something(membound, parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3)))))
-    diskpath = something(diskpath, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(default_dir(), randstring(6))))
-    diskdevice = something(diskdevice, SerializationFileDevice(FilesystemResource(), diskpath))
-    diskbound = something(diskbound, parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_BOUND", repr(32*(1024^3)))))
-    allocator_type = something(allocator_type, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_ALLOCATOR_KIND", "MRU"))
-    evict_delay = something(evict_delay, parse(Int, get(ENV, "JULIA_MEMPOOL_EXIT_EVICT_DELAY", "0")))
-
-    allocator_type ∉ ("LRU", "MRU") && throw(ArgumentError("Unknown allocator kind: $allocator_type. Available types: LRU, MRU"))
-
-    return DiskCacheConfig(
-        toggle,
-        membound,
-        diskpath,
-        diskdevice,
-        diskbound,
-        allocator_type,
-        evict_delay,
-    )
-end
-
-function setup_global_device!(cfg::DiskCacheConfig)
-    if !cfg.toggle
-        return nothing
-    end
-    if !isa(GLOBAL_DEVICE[],  CPURAMDevice)
-        # This detects if a disk cache was already set up
-        @warn(
-            "Setting the disk cache config when one is already set will lead to " *
-            "unexpected behavior and likely cause issues. Please restart the process" *
-            "before changing the disk cache configuration." *
-            "If this warning is unexpected you may need to " *
-            "clear the `JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR` ENV."
-        )
-    end
-
-    GLOBAL_DEVICE[] = SimpleRecencyAllocator(
-        cfg.membound,
-        cfg.diskdevice,
-        cfg.diskbound,
-        Symbol(cfg.allocator_type),
-    )
-    return nothing
-end
-
 function __init__()
-    global session = "sess-" * randstring(6)
     try
         global host = getipaddr()
     catch err
@@ -188,7 +123,7 @@ function __init__()
 end
 function exit_hook()
     exit_flag[] = true
-    evict_delay = something(tryparse(Int, get(ENV, "JULIA_MEMPOOL_EXIT_EVICT_DELAY", "0")), 0)::Int
+    evict_delay = DISKCACHE_CONFIG[].evict_delay
     kill_counter = evict_delay
     empty!(file_to_dref)
     empty!(who_has_read)
