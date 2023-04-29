@@ -119,7 +119,7 @@ struct DiskCacheConfig
 end
 
 function DiskCacheConfig(;
-    toggle::Bool=false,
+    toggle::Union{Nothing,Bool}=nothing,
     membound::Union{Nothing,Int}=nothing,
     diskpath::Union{Nothing,AbstractString}=nothing,
     diskdevice::Union{Nothing,StorageDevice}=nothing,
@@ -127,7 +127,7 @@ function DiskCacheConfig(;
     allocator_type::Union{Nothing,AbstractString}=nothing,
     evict_delay::Union{Nothing,Int}=nothing,
 )
-    toggle = something(toggle, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0"))
+    toggle = something(toggle, tryparse(Bool,get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0")))
     membound = something(membound, parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3)))))
     diskpath = something(diskpath, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(default_dir(), randstring(6))))
     diskdevice = something(diskdevice, SerializationFileDevice(FilesystemResource(), diskpath))
@@ -148,9 +148,6 @@ function DiskCacheConfig(;
     )
 end
 
-# TODO: we should have deconstruct functions for storage devices
-deconstruct_global_device(::StorageDevice) = nothing
-
 function setup_global_device!(cfg::DiskCacheConfig)
     if !cfg.toggle
         return nothing
@@ -160,11 +157,11 @@ function setup_global_device!(cfg::DiskCacheConfig)
         @warn(
             "Setting the disk cache config when one is already set will lead to " *
             "unexpected behavior and likely cause issues. Please restart the process" *
-            "before changing the disk cache configuration."
+            "before changing the disk cache configuration." *
+            "If this warning is unexpected you may need to " *
+            "clear the `JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR` ENV."
         )
     end
-
-    deconstruct_global_device(GLOBAL_DEVICE[])
 
     GLOBAL_DEVICE[] = SimpleRecencyAllocator(
         cfg.membound,
@@ -184,10 +181,7 @@ function __init__()
     end
 
     diskcache_config = DiskCacheConfig()
-
-
     setup_global_device!(diskcache_config)
-
 
     # Ensure we cleanup all references
     atexit(exit_hook)
