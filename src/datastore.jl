@@ -638,6 +638,12 @@ function DiskCacheConfig(;
     )
 end
 
+"""
+    setup_global_device!(cfg::DiskCacheConfig)
+
+Sets up the `GLOBAL_DEVICE` with a `SimpleRecencyAllocator` according to the provided `cfg`.
+The latest applied config can be found in `DISKCACHE_CONFIG[]`.
+"""
 function setup_global_device!(cfg::DiskCacheConfig)
     if !cfg.toggle
         return nothing
