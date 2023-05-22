@@ -401,89 +401,6 @@ function forwardkeyerror(f)
     end
 end
 
-const file_to_dref = Dict{String, DRef}()
-const who_has_read = Dict{String, Vector{DRef}}() # updated only on master process
-const enable_who_has_read = Ref(true)
-const enable_random_fref_serve = Ref(true)
-const wrkrips = Dict{IPv4,Vector{Int}}() # cached IP-pid map to lookup FileRef locations
-
-is_my_ip(ip::String) = getipaddr() == IPv4(ip)
-is_my_ip(ip::IPv4) = getipaddr() == ip
-
-function get_wrkrips()
-    d = Dict{IPv4,Vector{Int}}()
-    for w in Distributed.PGRP.workers
-        if w isa Distributed.Worker
-            wip = IPv4(w.config.bind_addr)
-        else
-            wip = isdefined(w, :bind_addr) ? IPv4(w.bind_addr) : MemPool.host
-        end
-        if wip in keys(d)
-            if enable_random_fref_serve[]
-                push!(d[wip], w.id)
-            else
-                d[wip] = [min(d[wip][1], w.id)]
-            end
-        else
-            d[wip] = [w.id]
-        end
-    end
-
-    loopback = ip"127.0.0.1"
-    if (loopback in keys(d)) && (length(d) > 1)
-        # there is a chance that workers on loopback are actually on same ip as master
-        realip = remotecall_fetch(getipaddr, first(d[loopback]))
-        if realip in keys(d)
-            append!(d[realip], d[loopback])
-        else
-            d[realip] = d[loopback]
-        end
-        delete!(d, loopback)
-    end
-    d
-end
-
-get_worker_at(ip::String) = get_worker_at(IPv4(ip))
-get_worker_at(ip::IPv4) = rand(get_workers_at(ip))
-
-function get_workers_at(ip::IPv4)
-    isempty(wrkrips) && merge!(wrkrips, remotecall_fetch(get_wrkrips, 1))
-    wrkrips[ip]
-end
-
-function poolget(r::FileRef)
-    # since loading a file is expensive, and often
-    # requested in quick succession
-    # we add the data to the pool
-    if haskey(file_to_dref, r.file)
-        ref = file_to_dref[r.file]
-        if ref.owner == myid()
-            return poolget(ref)
-        end
-    end
-
-    if is_my_ip(r.host)
-        x = unwrap_payload(open(deserialize, r.file, "r+"))
-    else
-        x = remotecall_fetch(get_worker_at(r.host), r.file) do file
-            unwrap_payload(open(deserialize, file, "r+"))
-        end
-    end
-    dref = poolset(x, file=r.file, size=r.size)
-    file_to_dref[r.file] = dref
-    if enable_who_has_read[]
-        remotecall_fetch(1, dref) do dr
-            who_has = MemPool.who_has_read
-            if !haskey(who_has, r.file)
-                who_has[r.file] = DRef[]
-            end
-            push!(who_has[r.file], dr)
-            nothing
-        end
-    end
-    return x
-end
-
 function poolget(r::DRef)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "?? (", r.owner, ", ", r.id, ") at ", myid(), "\n")
     if r.owner == myid()
@@ -502,7 +419,7 @@ function _getlocal(id, remote)
     return read_from_device(storage_read(state).root, state, id, true)
 end
 
-function datastore_delete(id; force=false)
+function datastore_delete(id)
     @safe_lock_spin datastore_counters_lock begin
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-- (", myid(), ", ", id, ") with ", string(datastore_counters[(myid(), id)]), "\n"; gc_context=true)
         delete!(datastore_counters, (myid(), id))
@@ -518,78 +435,14 @@ function datastore_delete(id; force=false)
     @safe_lock_spin datastore_lock begin
         haskey(datastore, id) && delete!(datastore, id)
     end
-    # TODO: maybe cleanup from the who_has_read list?
     return
 end
 
-pooldelete(r::DRef) = @warn "pooldelete(::DRef) is deprecated\nReferences are automatically deleted by the GC" maxlog=1
+const SESSION = Ref{String}()
 
-function pooldelete(r::FileRef)
-    isfile(r.file) && rm(r.file)
-    (r.file in keys(file_to_dref)) && delete!(file_to_dref, r.file)
-    # TODO: maybe cleanup from the who_has_read list?
-    nothing
-end
-
-global session = "sess-" * randstring(6)
-default_dir(p) = joinpath(homedir(), ".mempool", "$session-$p")
+default_dir(p) = joinpath(homedir(), ".mempool", "$(SESSION[])-$p")
 default_dir() = default_dir(myid())
 default_path(r::DRef) = joinpath(default_dir(r.owner), string(r.id))
-
-function movetodisk(r::DRef, path=nothing, keepinmemory=false)
-    if r.owner != myid()
-        return remotecall_fetch(movetodisk, r.owner, r, path, keepinmemory)
-    end
-    if path === nothing
-        path = default_path(r)
-    end
-
-    mkpath(dirname(path))
-    if isfile(path)
-        return FileRef(path, r.size)
-    end
-    # TODO: Async write
-    open(path, "w") do io
-        serialize(io, MMWrap(poolget(r)))
-    end
-    state = with_lock(datastore_lock) do
-        datastore[r.id]
-    end
-    device = SerializationFileDevice(path)
-    fref = FileRef(path, r.size)
-    notify(storage_rcu!(state) do sstate
-        StorageState(sstate; root=device,
-                             leaves=[StorageLeaf(device, Some{Any}(fref))])
-    end)
-
-    return fref
-end
-
-copytodisk(r::DRef, path=nothing) = movetodisk(r, path, true)
-
-"""
-Allow users to specifically save something to disk.
-This does not free the data from memory, nor does it affect
-size accounting.
-"""
-function savetodisk(r::DRef, path)
-    if r.owner == myid()
-        open(path, "w") do io
-            serialize(io, MMWrap(poolget(r)))
-        end
-        return FileRef(path, r.size)
-    else
-        return remotecall_fetch(savetodisk, r.owner, r, path)
-    end
-end
-
-function deletefromdisk(r::DRef, path)
-    if r.owner == myid()
-        return rm(path)
-    else
-        return remotecall_fetch(deletefromdisk, r.owner, r, path)
-    end
-end
 
 """
     DiskCacheConfig
@@ -673,4 +526,4 @@ function setup_global_device!(cfg::DiskCacheConfig)
 end
 
 # Stores the last applied disk cache config for future reference
-const DISKCACHE_CONFIG = Ref{DiskCacheConfig}(DiskCacheConfig())
+const DISKCACHE_CONFIG = Ref{DiskCacheConfig}()

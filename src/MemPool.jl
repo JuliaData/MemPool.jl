@@ -2,9 +2,7 @@ module MemPool
 
 using Serialization, Sockets, Random
 import Serialization: serialize, deserialize
-export DRef, FileRef, poolset, poolget, pooldelete,
-       movetodisk, copytodisk, savetodisk, mmwrite, mmread, cleanup,
-       deletefromdisk, poolref, poolunref
+export DRef, FileRef, poolset, poolget, mmwrite, mmread, cleanup
 import .Threads: ReentrantLock
 
 ## Wrapping-unwrapping of payloads:
@@ -35,23 +33,17 @@ end
 # This allows communicating only the file name across processors,
 # the receiver process will simply read from file while unwrapping
 struct FileRef
-    host::IPAddr
     file::String
     size::UInt
-    force_pid::Ref{Union{Int, Nothing}}
-
-    function FileRef(file, size; pid=nothing)
-        new(host, file, size, Ref{Union{Int, Nothing}}(pid))
+end
+function FileRef(file; pid=nothing)
+    size = try
+        UInt(Base.stat(file).size)
+    catch err
+        @debug "Failed to query FileRef size of $file"
+        UInt(0)
     end
-    function FileRef(file; pid=nothing)
-        size = try
-            UInt(Base.stat(file).size)
-        catch err
-            @debug "Failed to query FileRef size of $file"
-            UInt(0)
-        end
-        new(host, file, size, Ref{Union{Int, Nothing}}(pid))
-    end
+    return FileRef(file, size)
 end
 
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file, "r+"))
@@ -120,13 +112,9 @@ function approx_size(s::Symbol)
 end
 
 function __init__()
-    try
-        global host = getipaddr()
-    catch err
-        global host = Sockets.localhost
-    end
+    SESSION[] = "sess-" * randstring(6)
 
-    diskcache_config = DiskCacheConfig()
+    DISKCACHE_CONFIG[] = diskcache_config = DiskCacheConfig()
     setup_global_device!(diskcache_config)
 
     # Ensure we cleanup all references
@@ -136,8 +124,6 @@ function exit_hook()
     exit_flag[] = true
     evict_delay = DISKCACHE_CONFIG[].evict_delay
     kill_counter = evict_delay
-    empty!(file_to_dref)
-    empty!(who_has_read)
     GC.gc()
     yield()
     while kill_counter > 0 && with_lock(()->!isempty(datastore), datastore_lock)

@@ -246,31 +246,6 @@ end
     end
 end
 
-@testset "movetodisk" begin
-    ref = poolset([1,2], 2)
-    ref_id = ref.id
-    fref = movetodisk(ref)
-    @test isa(fref, MemPool.FileRef)
-    @test fref.host == getipaddr()
-    @test poolget(fref) == poolget(ref)
-    f = tempname()
-    fref2 = savetodisk(ref, f)
-    @test fref2.file == f
-    @test poolget(fref) == poolget(fref2)
-    ref = nothing; @everywhere GC.gc(); sleep(1)
-    @test fetch(@spawnat 2 !haskey(MemPool.datastore, ref_id))
-
-    ref = poolset([1,2], 2)
-    fref = movetodisk(ref)
-    @test remotecall_fetch(poolget, 2, fref) == poolget(ref)
-
-    @test MemPool.get_worker_at(getipaddr()) in [1,2,3]
-    @test remotecall_fetch(()->MemPool.get_worker_at(getipaddr()), 2) in [1,2,3]
-    @everywhere MemPool.enable_random_fref_serve[] = false
-    @everywhere empty!(MemPool.wrkrips)
-    @test MemPool.is_my_ip(getipaddr())
-end
-
 @testset "StorageState" begin
     sstate1 = MemPool.StorageState(nothing,
                                    MemPool.StorageLeaf[],
@@ -809,11 +784,3 @@ Allocate, write non-CPU A, write non-CPU B, handle for A was explicitly deleted
 Allocate, chain write and reads such that write starts before, and finishes after, read, ensure ordering is correct
 Stress RCU with many readers and one write-delete-read task
 =#
-
-@testset "who_has_read" begin
-    f = tempname()
-    ref = poolset([1:5;])
-    fref = savetodisk(ref, f)
-    r2 = remotecall_fetch(()->MemPool.poolget(fref), 2)
-    @test MemPool.who_has_read[f][1].owner == 2
-end
