@@ -348,15 +348,27 @@ isondisk(id::Int) =
 isinmemory(x::DRef) = isinmemory(x.id)
 isondisk(x::DRef) = isondisk(x.id)
 
-function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), retain=false, file=nothing, device=GLOBAL_DEVICE[])
+function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
+                 retain=false, restore=false,
+                 device=GLOBAL_DEVICE[], leaf_device=initial_leaf_device(device),
+                 tag=nothing, leaf_tag=Tag())
     if pid == myid()
         id = atomic_add!(id_counter, 1)
-        sstate = StorageState(Some{Any}(x),
-                              Vector{StorageLeaf}(),
-                              CPURAMDevice())
+        sstate = if !restore
+            StorageState(Some{Any}(x),
+                         Vector{StorageLeaf}(),
+                         CPURAMDevice())
+        else
+            @assert !isa(leaf_device, CPURAMDevice) "Cannot use `CPURAMDevice()` as leaf device when `restore=true`"
+            StorageState(nothing,
+                         [StorageLeaf(leaf_device, Some{Any}(x), retain)],
+                         leaf_device)
+        end
         notify(sstate)
         state = RefState(sstate,
-                         size)
+                         size,
+                         tag,
+                         leaf_tag)
         with_lock(datastore_counters_lock) do
             datastore_counters[(pid, id)] = RefCounters()
         end
@@ -365,23 +377,25 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x), retain=false
         end
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "++ (", myid(), ", ", id, ") [", x, "]\n")
         d = DRef(myid(), id, size)
-        if file !== nothing
-            device = SerializationFileDevice(dirname(file))
-            fref = FileRef(file, size)
-            notify(storage_rcu!(state) do sstate
-                StorageState(sstate; root=device,
-                                     leaves=[StorageLeaf(device, Some{Any}(fref), retain)])
-            end)
-            return d
-        end
-        write_to_device!(device, state, id)
-        if retain
-            retain_on_device!(device, state, id, true)
-        end
+        # Switch the root
         notify(storage_rcu!(state) do sstate
             StorageState(sstate; root=device)
         end)
-        d
+        if !(restore && device === leaf_device)
+            try
+                write_to_device!(device, state, id)
+            catch
+                # Revert the root switch to ensure we don't try to delete
+                notify(storage_rcu!(state) do sstate
+                    StorageState(sstate; root=CPURAMDevice())
+                end)
+                rethrow()
+            end
+        end
+        if retain
+            retain_on_device!(device, state, id, true; all=true)
+        end
+        return d
     else
         # use our serialization
         remotecall_fetch(pid, MMWrap(x)) do wx
@@ -428,10 +442,12 @@ function datastore_delete(id)
         haskey(datastore, id) ? datastore[id] : nothing
     end
     (state === nothing) && return
-    device = storage_read(state).root
-    if device !== nothing
-        errormonitor(Threads.@spawn delete_from_device!(device, state, id))
-    end
+    errormonitor(Threads.@spawn begin
+        device = storage_read(state).root
+        if device !== nothing
+            delete_from_device!(device, state, id)
+        end
+    end)
     @safe_lock_spin datastore_lock begin
         haskey(datastore, id) && delete!(datastore, id)
     end

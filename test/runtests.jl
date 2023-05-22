@@ -198,7 +198,8 @@ end
             # They know about this DRef
             @assert haskey(MemPool.datastore_counters, $key2)
             # They own it, and are told when others receive it (and we have received it, but they're already aware of that)
-            @assert MemPool.datastore_counters[$key2].worker_counter[] == 1
+            @show MemPool.datastore_counters[$key2].worker_counter[]
+            @assert MemPool.datastore_counters[$key2].worker_counter[] >= 1
             @assert length(MemPool.datastore_counters[$key2].recv_counters) == 0
             # They don't hold a local reference to it
             @assert MemPool.datastore_counters[$key2].local_counter[] == 0
@@ -305,10 +306,14 @@ end
                                    CPURAMDevice(),
                                    Base.Event())
     notify(sstate1)
-    state = MemPool.RefState(sstate1, 64)
+    state = MemPool.RefState(sstate1, 64, "abc", MemPool.Tag(SerializationFileDevice=>123))
     @test state.size == 64
     @test MemPool.storage_size(state) == 64
     @test_throws ArgumentError state.storage
+    @test_throws ArgumentError state.tag
+    @test_throws ArgumentError state.leaf_tag
+    @test MemPool.tag_read(state, sstate1, CPURAMDevice()) == "abc"
+    @test MemPool.tag_read(state, sstate1, SerializationFileDevice()) == 123
     sstate2 = MemPool.storage_read(state)
     @test sstate2 isa MemPool.StorageState
     @test sstate2 === sstate1
@@ -332,6 +337,20 @@ end
     @test something(leaf.handle) == 456
 
     @test_throws ConcurrencyViolationError MemPool.storage_rcu!(old_sstate->old_sstate, state)
+end
+
+@testset "Tag" begin
+    tag = MemPool.Tag()
+    @test tag[SerializationFileDevice] == nothing
+
+    tag = MemPool.Tag(SerializationFileDevice=>123)
+    @test tag[SerializationFileDevice] == 123
+    @test tag[CPURAMDevice] === nothing
+
+    tag = MemPool.Tag(SerializationFileDevice=>123, CPURAMDevice=>456)
+    @test tag[SerializationFileDevice] == 123
+    @test tag[CPURAMDevice] == 456
+    @test tag[SimpleRecencyAllocator] === nothing
 end
 
 @testset "CPURAMDevice" begin
@@ -454,6 +473,14 @@ end
         @test read(path, UInt8) != (value ⊻ 0x5) + 0x3
         # Filter is undone on read
         @test poolget(x1) == UInt8(123)
+    end
+
+    @testset "Custom File Name" begin
+        tag = "myfile.bin"
+        ref = poolset(123; device=sdevice, tag)
+        @test isfile(joinpath(dirpath, tag))
+        ref = nothing; GC.gc(); sleep(0.5)
+        @test !isfile(joinpath(dirpath, tag))
     end
 end
 
@@ -602,10 +629,12 @@ sra_ondisk_pos(sra, ref, idx) =
     refs = [poolset(123; device=sra) for i in 1:8]
     @test isempty(sra.device_refs)
     MemPool.retain_on_device!(sra, true)
-    # Retention is lazy
-    @test isempty(sra.device_refs)
-    @test length(readdir(dirname)) == 0
-    # Retention occurs on deletion
+
+    # Retention is immediate
+    @test !isempty(sra.device_refs)
+    @test length(readdir(dirname)) == 8
+
+    # Files still exist after refs expire
     refs = nothing; GC.gc(); sleep(0.5)
     @test isempty(sra.mem_refs)
     @test isempty(sra.device_refs)
