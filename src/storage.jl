@@ -204,9 +204,9 @@ for a (relatively) simple example of how to implement an allocator.
 abstract type StorageDevice end
 
 # TODO: Docstrings
-storage_available(dev::StorageDevice) = sum(res->storage_available(dev, res), storage_resources(dev))
-storage_capacity(dev::StorageDevice) = sum(res->storage_capacity(dev, res), storage_resources(dev))
-storage_utilized(dev::StorageDevice) = sum(res->storage_utilized(dev, res), storage_resources(dev))
+storage_available(dev::StorageDevice) = sum(res->storage_available(dev, res), storage_resources(dev); init=UInt64(0))
+storage_capacity(dev::StorageDevice) = sum(res->storage_capacity(dev, res), storage_resources(dev); init=UInt64(0))
+storage_utilized(dev::StorageDevice) = sum(res->storage_utilized(dev, res), storage_resources(dev); init=UInt64(0))
 check_same_resource(dev::StorageDevice, expected::StorageResource, res::StorageResource) =
     (expected === res) || throw(ArgumentError("Invalid storage resource $res for device $dev"))
 storage_available(dev::StorageDevice, res::StorageResource) =
@@ -587,6 +587,10 @@ struct SimpleRecencyAllocator <: StorageDevice
     mem_refs::Vector{Int}
     device_refs::Vector{Int}
 
+    # Cached sizes
+    mem_size::Base.RefValue{UInt64}
+    device_size::Base.RefValue{UInt64}
+
     # Counters for Hit, Miss, Evict
     stats::Vector{Int}
 
@@ -601,7 +605,8 @@ struct SimpleRecencyAllocator <: StorageDevice
         device_limit > 0 || throw(ArgumentError("Device limit must be positive and non-zero: $device_limit"))
         policy in (:LRU, :MRU) || throw(ArgumentError("Invalid recency policy: $policy"))
         return new(mem_limit, device, device_limit, policy,
-                   Int[], Int[], zeros(Int, 3), Ref(retain),
+                   Int[], Int[], Ref(UInt64(0)), Ref(UInt64(0)),
+                   zeros(Int, 3), Ref(retain),
                    Dict{Int,RefState}(), NonReentrantLock())
     end
 end
@@ -638,21 +643,14 @@ storage_available(sra::SimpleRecencyAllocator) =
     storage_capacity(sra) - storage_utilized(sra)
 function storage_utilized(sra::SimpleRecencyAllocator, res::StorageResource)
     if res isa CPURAMResource
-        return with_lock(sra.lock) do
-            sum(map(id->sra.ref_cache[id].size, sra.mem_refs))
-        end
+        return sra.mem_size[]
     elseif res in storage_resources(sra.device)
-        return with_lock(sra.lock) do
-            sum(map(id->sra.ref_cache[id].size, sra.device_refs))
-        end
+        return sra.device_size[]
     else
         throw(ArgumentError("Invalid storage resource $res for device $sra"))
     end
 end
-storage_utilized(sra::SimpleRecencyAllocator) = with_lock(sra.lock) do
-    sum(map(id->sra.ref_cache[id].size, sra.mem_refs)) +
-    sum(map(id->sra.ref_cache[id].size, sra.device_refs))
-end
+storage_utilized(sra::SimpleRecencyAllocator) = sra.mem_size[] + sra.device_size[]
 function write_to_device!(sra::SimpleRecencyAllocator, state::RefState, ref_id::Int)
     with_lock(sra.lock) do
         sra.ref_cache[ref_id] = state
@@ -664,37 +662,38 @@ function write_to_device!(sra::SimpleRecencyAllocator, state::RefState, ref_id::
         end
         sra_migrate!(sra, state, ref_id, true)
     catch err
-        delete!(sra.ref_cache, ref_id)
+        with_lock(sra.lock) do
+            delete!(sra.ref_cache, ref_id)
+        end
         rethrow(err)
     end
     return
 end
 function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_mem;
                       read=false, locked=false)
-    ref_size = state.size
-    if to_mem
-        # Demoting to device
-        from_refs = sra.mem_refs
-        from_limit = sra.mem_limit
-        from_device = CPURAMDevice()
-        to_refs = sra.device_refs
-        to_limit = sra.device_limit
-        to_device = sra.device
-    else
-        # Promoting to memory
-        from_refs = sra.device_refs
-        from_limit = sra.device_limit
-        from_device = sra.device
-        to_refs = sra.mem_refs
-        to_limit = sra.mem_limit
-        to_device = CPURAMDevice()
-    end
-    from_size = 0
-    to_size = 0
-    idx = 0
     with_lock(sra.lock, !locked) do
-        from_size = sum(map(id->sra.ref_cache[id].size, from_refs))
-        to_size = sum(map(id->sra.ref_cache[id].size, to_refs))
+        ref_size = state.size
+        if to_mem
+            # Demoting to device
+            from_refs = sra.mem_refs
+            from_limit = sra.mem_limit
+            from_device = CPURAMDevice()
+            from_size = sra.mem_size
+            to_refs = sra.device_refs
+            to_limit = sra.device_limit
+            to_device = sra.device
+            to_size = sra.device_size
+        else
+            # Promoting to memory
+            from_refs = sra.device_refs
+            from_limit = sra.device_limit
+            from_device = sra.device
+            from_size = sra.device_size
+            to_refs = sra.mem_refs
+            to_limit = sra.mem_limit
+            to_device = CPURAMDevice()
+            to_size = sra.mem_size
+        end
         idx = if sra.policy == :LRU
             to_mem ? lastindex(from_refs) : firstindex(from_refs)
         else
@@ -703,16 +702,16 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
 
         # Plan a batch of writes
         write_list = Int[]
-        while ref_size + from_size > from_limit
+        while ref_size + from_size[] > from_limit
             # Demote older/promote newer refs until space is available
             @assert 1 <= idx <= length(from_refs) "Failed to migrate $(Base.format_bytes(ref_size)) for ref $ref_id"
             oref = from_refs[idx]
             oref_size = sra.ref_cache[oref].size
-            if oref_size + to_size <= to_limit
+            if oref_size + to_size[] <= to_limit
                 # Destination has space for this ref
                 push!(write_list, idx)
-                from_size -= oref_size
-                to_size += oref_size
+                from_size[] -= oref_size
+                to_size[] += oref_size
             end
             idx += (to_mem ? -1 : 1) * (sra.policy == :LRU ? 1 : -1)
         end
@@ -736,7 +735,7 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
         end
 
         # Update counters
-        for oref in map(idx->from_refs[idx], write_list)
+        for oref in Iterators.map(idx->from_refs[idx], write_list)
             push!(to_refs, oref)
             deleteat!(from_refs, findfirst(==(oref), from_refs))
         end
@@ -745,11 +744,13 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
         @label write_ref
         pushfirst!(from_refs, ref_id)
         write_to_device!(from_device, state, ref_id)
+        from_size[] += state.size
 
         # If we already had this ref, delete it from previous device
         if findfirst(x->x==ref_id, to_refs) !== nothing
             delete_from_device!(to_device, state, ref_id)
             deleteat!(to_refs, findfirst(x->x==ref_id, to_refs))
+            to_size[] -= state.size
         end
 
         if read
