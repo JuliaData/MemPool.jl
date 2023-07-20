@@ -100,40 +100,30 @@ function approx_size(xs::AbstractArray{String})
     s + 4 * length(xs)
 end
 
-function approx_size(s::String) 
+function approx_size(s::String)
     sizeof(s)+sizeof(Int) # sizeof(Int) for 64 bit vs 32 bit systems
 end
 
-function approx_size(s::Symbol) 
+function approx_size(s::Symbol)
     sizeof(s)+sizeof(Int)
 end
 
 function __init__()
-    global session = "sess-" * randstring(6)
     try
         global host = getipaddr()
     catch err
         global host = Sockets.localhost
     end
-    if parse(Bool, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0"))
-        membound = parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3))))
-        diskpath = get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(default_dir(), randstring(6)))
-        diskdevice = SerializationFileDevice(FilesystemResource(), diskpath)
-        diskbound = parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_BOUND", repr(32*(1024^3))))
-        kind = get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_ALLOCATOR_KIND", "MRU")
-        if !(kind in ("LRU", "MRU"))
-            @warn "Unknown allocator kind: $kind\nDefaulting to MRU"
-            kind = "MRU"
-        end
-        GLOBAL_DEVICE[] = SimpleRecencyAllocator(membound, diskdevice, diskbound, Symbol(kind))
-    end
+
+    diskcache_config = DiskCacheConfig()
+    setup_global_device!(diskcache_config)
 
     # Ensure we cleanup all references
     atexit(exit_hook)
 end
 function exit_hook()
     exit_flag[] = true
-    evict_delay = something(tryparse(Int, get(ENV, "JULIA_MEMPOOL_EXIT_EVICT_DELAY", "0")), 0)::Int
+    evict_delay = DISKCACHE_CONFIG[].evict_delay
     kill_counter = evict_delay
     empty!(file_to_dref)
     empty!(who_has_read)

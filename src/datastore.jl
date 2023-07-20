@@ -531,6 +531,7 @@ function pooldelete(r::FileRef)
     nothing
 end
 
+global session = "sess-" * randstring(6)
 default_dir(p) = joinpath(homedir(), ".mempool", "$session-$p")
 default_dir() = default_dir(myid())
 default_path(r::DRef) = joinpath(default_dir(r.owner), string(r.id))
@@ -589,3 +590,87 @@ function deletefromdisk(r::DRef, path)
         return remotecall_fetch(deletefromdisk, r.owner, r, path)
     end
 end
+
+"""
+    DiskCacheConfig
+
+Helper struct that stores the config for the disk caching setup.
+Handles either direct input or uses the ENVs from the original implementation.
+Latest applied config can be found in the `DISKCACHE_CONFIG[]`.
+"""
+struct DiskCacheConfig
+    toggle::Bool
+    membound::Int
+    diskpath::AbstractString
+    diskdevice::StorageDevice
+    diskbound::Int
+    allocator_type::AbstractString
+    evict_delay::Int
+end
+
+function DiskCacheConfig(;
+    toggle::Union{Nothing,Bool}=nothing,
+    membound::Union{Nothing,Int}=nothing,
+    diskpath::Union{Nothing,AbstractString}=nothing,
+    diskdevice::Union{Nothing,StorageDevice}=nothing,
+    diskbound::Union{Nothing,Int}=nothing,
+    allocator_type::Union{Nothing,AbstractString}=nothing,
+    evict_delay::Union{Nothing,Int}=nothing,
+)
+    toggle = something(toggle, parse(Bool, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR", "0")))
+    membound = something(membound, parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND", repr(8*(1024^3)))))
+    diskpath = something(diskpath, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE", joinpath(default_dir(), randstring(6))))
+    diskdevice = something(diskdevice, SerializationFileDevice(FilesystemResource(), diskpath))
+    diskbound = something(diskbound, parse(Int, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_DISK_BOUND", repr(32*(1024^3)))))
+    allocator_type = something(allocator_type, get(ENV, "JULIA_MEMPOOL_EXPERIMENTAL_ALLOCATOR_KIND", "MRU"))
+    evict_delay = something(evict_delay, parse(Int, get(ENV, "JULIA_MEMPOOL_EXIT_EVICT_DELAY", "0")))
+
+    allocator_type ∉ ("LRU", "MRU") && throw(ArgumentError("Unknown allocator kind: $allocator_type. Available types: LRU, MRU"))
+
+    return DiskCacheConfig(
+        toggle,
+        membound,
+        diskpath,
+        diskdevice,
+        diskbound,
+        allocator_type,
+        evict_delay,
+    )
+end
+
+"""
+    setup_global_device!(cfg::DiskCacheConfig)
+
+Sets up the `GLOBAL_DEVICE` with a `SimpleRecencyAllocator` according to the provided `cfg`.
+The latest applied config can be found in `DISKCACHE_CONFIG[]`.
+"""
+function setup_global_device!(cfg::DiskCacheConfig)
+    if !cfg.toggle
+        return nothing
+    end
+    if !isa(GLOBAL_DEVICE[],  CPURAMDevice)
+        # This detects if a disk cache was already set up
+        @warn(
+            "Setting the disk cache config when one is already set will lead to " *
+            "unexpected behavior and likely cause issues. Please restart the process" *
+            "before changing the disk cache configuration." *
+            "If this warning is unexpected you may need to " *
+            "clear the `JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR` ENV."
+        )
+    end
+
+    GLOBAL_DEVICE[] = SimpleRecencyAllocator(
+        cfg.membound,
+        cfg.diskdevice,
+        cfg.diskbound,
+        Symbol(cfg.allocator_type),
+    )
+
+    # Set the config to a global ref for future reference on exit or elsewhere
+    DISKCACHE_CONFIG[] = cfg
+
+    return nothing
+end
+
+# Stores the last applied disk cache config for future reference
+const DISKCACHE_CONFIG = Ref{DiskCacheConfig}(DiskCacheConfig())
