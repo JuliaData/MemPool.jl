@@ -17,20 +17,21 @@ storage medium (such as a hard disk-backed filesystem, an S3 bucket, etc.),
 while a `StorageDevice` represents a mechanism by which data can be written to
 and read from an associated `StorageResource`. For example, the built-in
 `FilesystemResource` is a `StorageResource` which represents a mounted
-filesystem, while the `SerializationFileDevice` is a `StorageDevice` which can
-store data on a `FilesystemResource` as a set of files written using the
-`Serialization` stdlib format. Other `StorageResource`s and `StorageDevice`s
-may be implemented by libraries or users to suit the specific storage medium
-and use case.
+filesystem, while the `GenericFileDevice` is a `StorageDevice` which can store
+data on a `FilesystemResource` as a set of files written using user-provided
+serialization and deserialization methods. Other `StorageResource`s and
+`StorageDevice`s may be implemented by libraries or users to suit the specific
+storage medium and use case.
 
 All DRefs have an associated `StorageDevice`, which manages the reference's
 data. The global device is available at `GLOBAL_DEVICE[]`, and may be
 set by the user to whatever device is most desirable as a default. When a DRef
 is created with `poolset`, a "root" `StorageDevice` will be associated which
 manages the reference's data, either directly, or indirectly by managing other
-`StorageDevice`s. For example, the built-in `SimpleRecencyAllocator` can use assigned as
-the root device to manage a `CPURAMDevice` and a `SerializationFileDevice` to
-provide automatic swap-to-disk in a least-recently-used fashion.
+`StorageDevice`s. For example, the built-in `SimpleRecencyAllocator` can use
+assigned as the root device to manage a `CPURAMDevice` and a
+`GenericFileDevice` to provide automatic swap-to-disk in a least-recently-used
+fashion.
 
 ## Entrypoints
 
@@ -192,8 +193,7 @@ The abstract supertype of all storage devices. A `StorageDevice` must implement
 may reflect a mechanism for storing data on persistent storage, or it may be an
 allocator which manages other `StorageDevice`s.
 
-See the `SerializationFileDevice` for an example of how to implement a data
-store.
+See the `GenericFileDevice` for an example of how to implement a data store.
 
 When implementing an allocator, it's recommended to provide options that users
 can tune to control how many bytes of storage may be used for each managed
@@ -215,6 +215,14 @@ storage_capacity(dev::StorageDevice, res::StorageResource) =
     throw(ArgumentError("Invalid storage resource $res for device $dev"))
 storage_utilized(dev::StorageDevice, res::StorageResource) =
     throw(ArgumentError("Invalid storage resource $res for device $dev"))
+
+struct Tag
+    tags::Dict{Type,Any}
+    Tag(tags...) =
+        new(Dict{Type,Any}(tags...))
+end
+Base.getindex(tag::Tag, ::Type{device}) where {device<:StorageDevice} =
+    get(tag.tags, device, nothing)
 
 mutable struct StorageLeaf
     # A low-level storage device
@@ -265,21 +273,37 @@ mutable struct RefState
     @atomic storage::StorageState
     # The estimated size that the values of the reference take in memory
     size::UInt64
+    # Metadata to associate with the reference
+    tag::Any
+    leaf_tag::Tag
 end
+RefState(storage::StorageState, size::Integer) =
+    RefState(storage, size, nothing, Tag())
 function Base.getproperty(state::RefState, field::Symbol)
     if field === :storage
-        throw(ArgumentError("Cannot directly read :storage field of RefState\nUse storage_read(state) instead"))
+        throw(ArgumentError("Cannot directly read `:storage` field of `RefState`\nUse `storage_read(state)` instead"))
+    elseif field === :tag || field === :leaf_tag
+        throw(ArgumentError("Cannot directly read `$(repr(field))` field of `RefState`\nUse `tag_read(state, storage_read(state), device)` instead"))
     end
     return getfield(state, field)
 end
 function Base.setproperty!(state::RefState, field::Symbol, value)
     if field === :storage
-        throw(ArgumentError("Cannot directly write :storage field of RefState\nUse storage_rcu!(f, state) instead"))
+        throw(ArgumentError("Cannot directly write `:storage` field of `RefState`\nUse `storage_rcu!(f, state)` instead"))
+    elseif field === :tag || field === :leaf_tag
+        throw(ArgumentError("Cannot write `$(repr(field))` field of `RefState`"))
     end
     return setfield!(state, field, value)
 end
 Base.show(io::IO, state::RefState) =
-    print(io, "RefState(size=$(Base.format_bytes(state.size)))")
+    print(io, "RefState(size=$(Base.format_bytes(state.size)), tag=$(getfield(state, :tag)), leaf_tag=$(getfield(state, :leaf_tag)))")
+
+function tag_read(state::RefState, sstate::StorageState, device::StorageDevice)
+    if sstate.root === device
+        return getfield(state, :tag)
+    end
+    return getfield(state, :leaf_tag)[typeof(device)]
+end
 
 "Returns the size of the data for reference `id`."
 storage_size(ref::DRef) =
@@ -375,16 +399,23 @@ retain_on_device!(device::StorageDevice, id::Int, retain::Bool; kwargs...) =
     retain_on_device!(device, with_lock(()->datastore[id], datastore_lock), id, retain; kwargs...)
 function retain_on_device!(device::StorageDevice, state::RefState, id::Int, retain::Bool; all=false)
     notify(storage_rcu!(state) do sstate
-        devices = if all && device === sstate.root
-            map(l->l.device, sstate.leaves)
+        leaf_devices = map(l->l.device, sstate.leaves)
+        devices = if all
+            if device !== sstate.root
+                retain_error_invalid_device(device)
+            end
+            leaf_devices
         else
-            [device]
+            if findfirst(d->d===device, leaf_devices) === nothing
+                retain_error_invalid_device(device)
+            end
+            StorageDevice[device]
         end
         leaves = copy_leaves(sstate.leaves)
         for device in devices
             idx = findfirst(l->l.device === device, leaves)
             if idx === nothing
-                throw(ArgumentError("Invalid device $device"))
+                retain_error_invalid_device(device)
             end
             leaf = leaves[idx]
             leaves[idx] = StorageLeaf(leaf.device, leaf.handle, retain)
@@ -393,8 +424,71 @@ function retain_on_device!(device::StorageDevice, state::RefState, id::Int, reta
     end)
     return
 end
+@inline retain_error_invalid_device(device) =
+    throw(ArgumentError("Attempted to retain to invalid device: $device"))
 
 retain_on_device!(device::StorageDevice, retain::Bool) = nothing
+
+"""
+    isretained(state::RefState, device::StorageDevice) -> Bool
+
+Returns `true` if the reference identified by `state` is retained on `device`;
+returns `false` otherwise.
+"""
+function isretained(state::RefState, device::StorageDevice)
+    sstate = storage_read(state)
+    for leaf in leaves
+        if leaf.device === device && leaf.retain
+            return true
+        end
+    end
+    return false
+end
+isretained(id::Int, device::StorageDevice) =
+    isretained(with_lock(()->datastore[id], datastore_lock), device)
+
+"""
+    set_device!(device::StorageDevice, state::RefState, id::Int)
+
+Sets the root device for reference `id` to be `device`, writes the reference to
+that device, and waits for the write to complete.
+"""
+function set_device!(device::StorageDevice, state::RefState, id::Int)
+    sstate = storage_read(state)
+    old_device = sstate.root
+    # Skip if the root is already set
+    # FIXME: Why do we care if the leaf is set?
+    if old_device === device && findfirst(l->l.device === device, sstate.leaves) !== nothing
+        return
+    end
+    # Read from old device to ensure data is in memory
+    read_from_device(old_device, state, id, false)
+    # Switch root
+    notify(storage_rcu!(state) do sstate
+        StorageState(sstate; root=device)
+    end)
+    try
+        # Write to new device
+        write_to_device!(device, state, id)
+    catch
+        # Revert root switch
+        notify(storage_rcu!(state) do sstate
+            StorageState(sstate; root=old_device)
+        end)
+        rethrow()
+    end
+    return
+end
+set_device!(device::StorageDevice, id::Int) =
+    set_device!(device, with_lock(()->datastore[id], datastore_lock), id)
+function set_device!(device::StorageDevice, ref::DRef)
+    @assert ref.owner == myid()
+    set_device!(device, ref.id)
+end
+function set_device!(device::StorageDevice, state::RefState, ref::DRef)
+    @assert ref.owner == myid()
+    set_device!(device, state, ref.id)
+end
 
 """
     externally_varying(device::StorageDevice) -> Bool
@@ -414,6 +508,14 @@ guarantees that allocations will not trigger forced OS memory reclamation (such
 as by the Linux OOM killer).
 """
 externally_varying(::StorageDevice) = true
+
+"""
+    initial_leaf_device(device::StorageDevice) -> StorageDevice
+
+Returns the preferred initial leaf device for the root device `device`.
+Defaults to returning `device` itself.
+"""
+initial_leaf_device(device::StorageDevice) = device
 
 """
     CPURAMDevice <: StorageDevice
@@ -454,49 +556,75 @@ function delete_from_device!(::CPURAMDevice, state::RefState, ref_id::Int)
     end)
     return
 end
+isretained(state::RefState, ::CPURAMDevice) = false
 
 """
-    SerializationFileDevice <: StorageDevice
+    GenericFileDevice{S,D,F,M} <: StorageDevice
 
-Stores data in a temporary file, using the `Serialization` stdlib to serialize
-and deserialize data. Also supports optional ser/des filtering stages, such as
-for compression or encryption.
+Stores data in a file on a filesystem (within a specified directory), using `S`
+to serialize data and `D` to deserialize data. If `F` is `true`, then `S` and
+`D` operate on an `IO` object which is pointing to the file; if `false`, `S`
+and `D` operate on a `String` path to the file. If `M` is `true`, uses `MMWrap`
+to allowing memory mapping of data; if `false`, memory mapping is disabled.
+
+Also supports optional ser/des filtering stages, such as for compression or
+encryption. `filters` are an optional set of pairs of filtering functions to
+apply; the first in a pair is the serialization filter, and the second is the
+deserialization filter.
+
+A `String`-typed tag is supported to specify the path to save the file at,
+which should be relative to `dir`.
 """
-struct SerializationFileDevice <: StorageDevice
+struct GenericFileDevice{S,D,F,M} <: StorageDevice
     fs::FilesystemResource
     dir::String
     filters::Vector{Pair}
 end
-"Construct a `SerializationFileDevice` which stores data in the directory `dir`."
-SerializationFileDevice(fs, dir; filters=Pair[]) =
-    SerializationFileDevice(fs, dir, filters)
-SerializationFileDevice(dir; filters=Pair[]) =
-    SerializationFileDevice(FilesystemResource(Sys.iswindows() ? "C:" : "/"), dir, filters)
-SerializationFileDevice(; filters=Pair[]) =
-    SerializationFileDevice(joinpath(tempdir(), ".mempool"); filters)
-storage_resources(dev::SerializationFileDevice) = Set{StorageResource}([dev.fs])
-function storage_capacity(dev::SerializationFileDevice, res::FilesystemResource)
+
+"""
+    GenericFileDevice{S,D,F,M}(fs::FilesystemResource, dir::String; filters) where {S,D,F,M}
+    GenericFileDevice{S,D,F,M}(dir::String; filters) where {S,D,F,M}
+    GenericFileDevice{S,D,F,M}(; filters) where {S,D,F,M}
+
+Construct a `GenericFileDevice` which stores data in the directory `dir`. It is
+assumed that `dir` is located on the filesystem specified by `fs`, which is
+inferred if unspecified. If `dir` is unspecified, then files are stored in an
+arbitrary location. See [`GenericFileDevice`](@ref) for further details.
+"""
+GenericFileDevice{S,D,F,M}(fs, dir; filters=Pair[]) where {S,D,F,M} =
+    GenericFileDevice{S,D,F,M}(fs, dir, filters)
+GenericFileDevice{S,D,F,M}(dir; filters=Pair[]) where {S,D,F,M} =
+    GenericFileDevice{S,D,F,M}(FilesystemResource(Sys.iswindows() ? "C:" : "/"), dir, filters) # FIXME: FS path
+GenericFileDevice{S,D,F,M}(; filters=Pair[]) where {S,D,F,M} =
+    GenericFileDevice{S,D,F,M}(joinpath(tempdir(), ".mempool"); filters)
+storage_resources(dev::GenericFileDevice) = Set{StorageResource}([dev.fs])
+function storage_capacity(dev::GenericFileDevice, res::FilesystemResource)
     check_same_resource(dev, dev.fs, res)
     storage_capacity(res)
 end
-storage_capacity(dev::SerializationFileDevice) = storage_capacity(dev.fs)
-function storage_available(dev::SerializationFileDevice, res::FilesystemResource)
+storage_capacity(dev::GenericFileDevice) = storage_capacity(dev.fs)
+function storage_available(dev::GenericFileDevice, res::FilesystemResource)
     check_same_resource(dev, dev.fs, res)
     storage_available(res)
 end
-storage_available(dev::SerializationFileDevice) = storage_available(dev.fs)
-function storage_utilized(dev::SerializationFileDevice, res::FilesystemResource)
+storage_available(dev::GenericFileDevice) = storage_available(dev.fs)
+function storage_utilized(dev::GenericFileDevice, res::FilesystemResource)
     check_same_resource(dev, dev.fs, res)
     return storage_capacity(dev, res) - storage_available(dev, res)
 end
-storage_utilized(dev::SerializationFileDevice) =
+storage_utilized(dev::GenericFileDevice) =
     storage_capacity(dev, dev.fs) - storage_available(dev, dev.fs)
-function write_to_device!(device::SerializationFileDevice, state::RefState, ref_id::Int)
+function write_to_device!(device::GenericFileDevice{S,D,F,M}, state::RefState, ref_id::Int) where {S,D,F,M}
     mkpath(device.dir)
-    path = tempname(device.dir; cleanup=false)
-    fref = FileRef(path, state.size)
     sstate = storage_read(state)
     data = sstate.data
+    tag = tag_read(state, sstate, device)
+    path = if tag !== nothing
+        touch(joinpath(device.dir, tag))
+    else
+        tempname(device.dir; cleanup=false)
+    end
+    fref = FileRef(path, state.size)
     if data === nothing
         data = read_from_device(first(sstate.leaves).device, state, ref_id, true)
     else
@@ -507,19 +635,26 @@ function write_to_device!(device::SerializationFileDevice, state::RefState, ref_
         StorageState(sstate; leaves=vcat(sstate.leaves, leaf))
     end
     errormonitor(Threads.@spawn begin
-        open(path, "w") do io
-            for (write_filt, ) in reverse(device.filters)
-                io = write_filt(io)
+        if F
+            open(path, "w+") do io
+                for (write_filt, ) in reverse(device.filters)
+                    io = write_filt(io)
+                end
+                S(io, (M ? MMWrap : identity)(data))
+                close(io)
             end
-            serialize(io, MMWrap(data))
-            close(io)
+        else
+            if length(device.filters) > 0
+                throw(ArgumentError("Cannot use filters with $(typeof(device))\nPlease use a different device if filtering is required"))
+            end
+            S(path, data)
         end
         leaf.handle = Some{Any}(fref)
         notify(sstate)
     end)
     return
 end
-function read_from_device(device::SerializationFileDevice, state::RefState, id::Int, ret::Bool)
+function read_from_device(device::GenericFileDevice{S,D,F,M}, state::RefState, id::Int, ret::Bool) where {S,D,F,M}
     sstate = storage_read(state)
     data = sstate.data
     if data !== nothing
@@ -532,11 +667,18 @@ function read_from_device(device::SerializationFileDevice, state::RefState, id::
         StorageState(sstate)
     end
     errormonitor(Threads.@spawn begin
-        data = open(fref.file, "r+") do io
-            for (_, read_filt) in reverse(device.filters)
-                io = read_filt(io)
+        data = if F
+            open(fref.file, "r") do io
+                for (_, read_filt) in reverse(device.filters)
+                    io = read_filt(io)
+                end
+                (M ? unwrap_payload : identity)(D(io))
             end
-            unwrap_payload(deserialize(io))
+        else
+            if length(device.filters) > 0
+                throw(ArgumentError("Cannot use filters with $(typeof(device))\nPlease use a different device if filtering is required"))
+            end
+            D(fref.file)
         end
         sstate.data = Some{Any}(data)
         notify(sstate)
@@ -545,23 +687,35 @@ function read_from_device(device::SerializationFileDevice, state::RefState, id::
         return something(sstate.data)
     end
 end
-function delete_from_device!(device::SerializationFileDevice, state::RefState, id::Int)
+function delete_from_device!(device::GenericFileDevice, state::RefState, id::Int)
     sstate = storage_read(state)
     idx = findfirst(l->l.device === device, sstate.leaves)
     idx === nothing && return
     leaf = sstate.leaves[idx]
-    fref = something(leaf.handle)
-    notify(storage_rcu!(state) do sstate
+    new_sstate = storage_rcu!(state) do sstate
         StorageState(sstate; leaves=filter(l->l.device !== device,
                                            sstate.leaves))
-    end)
-    if !leaf.retain
+    end
+    if leaf.retain
+        notify(new_sstate)
+    else
+        fref = something(leaf.handle)
         errormonitor(Threads.@spawn begin
             rm(fref.file; force=true)
+            notify(new_sstate)
         end)
     end
     return
 end
+
+# For convenience and backwards-compatibility
+"""
+    SerializationFileDevice === GenericFileDevice{serialize,deserialize,true,true}
+
+Stores data using the `Serialization` stdlib to serialize and deserialize data.
+See `GenericFileDevice` for further details.
+"""
+const SerializationFileDevice = GenericFileDevice{serialize,deserialize,true,true}
 
 """
     SimpleRecencyAllocator <: StorageDevice
@@ -573,8 +727,8 @@ moved to the `lower` device (which is unbounded), and the new allocation will
 be moved to the `upper` device.
 
 Consider using an `upper` device of `CPURAMDevice` and a `lower` device of
-`SerializationFileDevice` to implement a basic swap-to-disk allocator. Such a
-device will be created and used automatically if the environment variable
+`GenericFileDevice` to implement a basic swap-to-disk allocator. Such a device
+will be created and used automatically if the environment variable
 `JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR` is set to `1` or `true`.
 """
 struct SimpleRecencyAllocator <: StorageDevice
@@ -594,7 +748,7 @@ struct SimpleRecencyAllocator <: StorageDevice
     # Counters for Hit, Miss, Evict
     stats::Vector{Int}
 
-    # Whether to retain all tracked refs
+    # Whether to retain all tracked refs on the device
     retain::Base.RefValue{Bool}
 
     ref_cache::Dict{Int,RefState}
@@ -621,7 +775,7 @@ function Base.show(io::IO, sra::SimpleRecencyAllocator)
     device_used = Base.format_bytes(device_used)
     mem_limit = Base.format_bytes(sra.mem_limit)
     device_limit = Base.format_bytes(sra.device_limit)
-    println(io, "SimpleRecencyAllocator(mem: $mem_used used ($mem_limit max), device: $device_used used ($device_limit max), policy: $(sra.policy))")
+    println(io, "SimpleRecencyAllocator(mem: $mem_used used ($mem_limit max), device($(sra.device)): $device_used used ($device_limit max), policy: $(sra.policy))")
     print(io, "  Stats: $(sra.stats[1]) Hits, $(sra.stats[2]) Misses, $(sra.stats[3]) Evicts")
 end
 
@@ -660,7 +814,7 @@ function write_to_device!(sra::SimpleRecencyAllocator, state::RefState, ref_id::
             # Too bulky
             throw(ArgumentError("Cannot write ref $ref_id of size $(Base.format_bytes(state.size)) to LRU"))
         end
-        sra_migrate!(sra, state, ref_id, true)
+        sra_migrate!(sra, state, ref_id, missing)
     catch err
         with_lock(sra.lock) do
             delete!(sra.ref_cache, ref_id)
@@ -671,6 +825,27 @@ function write_to_device!(sra::SimpleRecencyAllocator, state::RefState, ref_id::
 end
 function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_mem;
                       read=false, locked=false)
+    ref_size = state.size
+
+    # N.B. "from" is the device where *other* refs are migrating from,
+    # and go to the "to" device. The passed-in ref is inserted into the
+    # "from" device.
+    if ismissing(to_mem)
+        # Try to minimize reads/writes
+        sstate = storage_read(state)
+        if sstate.data !== nothing
+            # Try to keep it in memory
+            to_mem = true
+        elseif any(l->l.device === sra.device, sstate.leaves)
+            # Try to leave it on device
+            to_mem = false
+        else
+            # Fallback
+            # TODO: Be smarter?
+            to_mem = true
+        end
+    end
+
     with_lock(sra.lock, !locked) do
         ref_size = state.size
         if to_mem
@@ -700,17 +875,26 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
             to_mem ? firstindex(from_refs) : lastindex(from_refs)
         end
 
+        if ref_id in from_refs
+            # This ref is already where it needs to be
+            @goto write_done
+        end
+
         # Plan a batch of writes
         write_list = Int[]
         while ref_size + from_size[] > from_limit
             # Demote older/promote newer refs until space is available
             @assert 1 <= idx <= length(from_refs) "Failed to migrate $(Base.format_bytes(ref_size)) for ref $ref_id"
             oref = from_refs[idx]
-            oref_size = sra.ref_cache[oref].size
-            if oref_size + to_size[] <= to_limit
-                # Destination has space for this ref
+            oref_state = sra.ref_cache[oref]
+            oref_size = oref_state.size
+            if (to_mem && sra.retain[]) || ((oref_size + to_size[] <= to_limit) &&
+                                            !isretained(oref_state, from_device))
+                # Retention is active while demoting to device, or else destination has space for this ref
                 push!(write_list, idx)
-                from_size[] -= oref_size
+                if !(!to_mem && sra.retain[])
+                    from_size[] -= oref_size
+                end
                 to_size[] += oref_size
             end
             idx += (to_mem ? -1 : 1) * (sra.policy == :LRU ? 1 : -1)
@@ -727,32 +911,42 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
             # N.B. We `write_to_device!` before deleting from old device, in case
             # the write fails (so we don't lose data)
             write_to_device!(to_device, oref_state, oref)
-            @async delete_from_device!(from_device, oref_state, oref)
-            @assert begin
-                sstate = storage_read(oref_state)
-                sstate.data !== nothing || any(l->l.handle !== nothing, sstate.leaves)
+            if !(!to_mem && sra.retain[])
+                @async delete_from_device!(from_device, oref_state, oref)
             end
         end
 
         # Update counters
         for oref in Iterators.map(idx->from_refs[idx], write_list)
             push!(to_refs, oref)
-            deleteat!(from_refs, findfirst(==(oref), from_refs))
+            if !(!to_mem && sra.retain[])
+                deleteat!(from_refs, findfirst(==(oref), from_refs))
+            end
         end
 
-        # Space available, perform migration
         @label write_ref
+        # Space available, perform migration
         pushfirst!(from_refs, ref_id)
-        write_to_device!(from_device, state, ref_id)
         from_size[] += state.size
+        sstate = storage_read(state)
+        if findfirst(l->l.device === from_device, sstate.leaves) === nothing
+            # If this ref isn't already on the target device
+            write_to_device!(from_device, state, ref_id)
+        end
+
+        # Write-through to device if retaining
+        if to_mem && sra.retain[]
+            write_to_device!(to_device, state, ref_id)
+        end
 
         # If we already had this ref, delete it from previous device
-        if findfirst(x->x==ref_id, to_refs) !== nothing
+        if !(to_mem && sra.retain[]) && findfirst(x->x==ref_id, to_refs) !== nothing
             delete_from_device!(to_device, state, ref_id)
             deleteat!(to_refs, findfirst(x->x==ref_id, to_refs))
             to_size[] -= state.size
         end
 
+        @label write_done
         if read
             return read_from_device(from_device, state, ref_id, true)
         end
@@ -777,57 +971,37 @@ function read_from_device(sra::SimpleRecencyAllocator, state::RefState, id::Int,
 end
 function delete_from_device!(sra::SimpleRecencyAllocator, state::RefState, id::Int)
     with_lock(sra.lock) do
+        if sra.retain[]
+            # Migrate to device for retention
+            sra_migrate!(sra, state, id, false; read=false, locked=true)
+        end
         if (idx = findfirst(x->x==id, sra.mem_refs)) !== nothing
-            if sra.retain[]
-                # Migrate to device for retention
-                sra_migrate!(sra, state, id, false; read=false, locked=true)
-            else
-                delete_from_device!(CPURAMDevice(), state, id)
-                deleteat!(sra.mem_refs, idx)
-                delete!(sra.ref_cache, id)
-                return
-            end
+            delete_from_device!(CPURAMDevice(), state, id)
+            deleteat!(sra.mem_refs, idx)
         end
         if (idx = findfirst(x->x==id, sra.device_refs)) !== nothing
-            if sra.retain[]
-                retain_on_device!(sra.device, state, sra.device_refs[idx], true)
+            if !sra.retain[]
+                delete_from_device!(sra.device, state, id)
             end
-            delete_from_device!(sra.device, state, sra.device_refs[idx])
             deleteat!(sra.device_refs, idx)
-            delete!(sra.ref_cache, id)
         end
+        delete!(sra.ref_cache, id)
     end
     return
 end
 function retain_on_device!(sra::SimpleRecencyAllocator, retain::Bool)
     with_lock(sra.lock) do
-        # Retention will happen lazily, upon deletion
         sra.retain[] = retain
+        for id in sra.device_refs
+            retain_on_device!(sra.device, sra.ref_cache[id], id, true)
+        end
+        for id in copy(sra.mem_refs)
+            sra_migrate!(sra, sra.ref_cache[id], id, false; read=false, locked=true)
+            retain_on_device!(sra.device, sra.ref_cache[id], id, true)
+        end
     end
 end
 externally_varying(::SimpleRecencyAllocator) = false
-
-function set_device!(device::StorageDevice, state::RefState, id::Int)
-    sstate = storage_read(state)
-    old_device = sstate.root
-    if old_device === device && findfirst(l->l.device === device, sstate.leaves) !== nothing
-        return
-    end
-    write_to_device!(device, state, id)
-    notify(storage_rcu!(state) do sstate
-        StorageState(sstate; root=device)
-    end)
-    return
-end
-set_device!(device::StorageDevice, id::Int) =
-    set_device!(device, with_lock(()->datastore[id], datastore_lock), id)
-function set_device!(device::StorageDevice, ref::DRef)
-    @assert ref.owner == myid()
-    set_device!(device, ref.id)
-end
-function set_device!(device::StorageDevice, state::RefState, ref::DRef)
-    @assert ref.owner == myid()
-    set_device!(device, state, ref.id)
-end
+initial_leaf_device(sra::SimpleRecencyAllocator) = CPURAMDevice()
 
 const GLOBAL_DEVICE = Ref{StorageDevice}(CPURAMDevice())
