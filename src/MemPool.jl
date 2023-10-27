@@ -122,17 +122,28 @@ function __init__()
 end
 function exit_hook()
     exit_flag[] = true
+
     evict_delay = DISKCACHE_CONFIG[].evict_delay
     kill_counter = evict_delay
+
+    function datastore_empty(do_lock=true)
+        with_lock(datastore_lock, do_lock) do
+            all(ref->storage_read(ref).root isa CPURAMDevice, values(datastore))
+        end
+    end
+
+    # Wait for datastore objects to naturally expire
     GC.gc()
     yield()
-    while kill_counter > 0 && with_lock(()->!isempty(datastore), datastore_lock)
+    while kill_counter > 0 && !datastore_empty()
         GC.gc()
         sleep(1)
         kill_counter -= 1
     end
+
+    # Forcibly evict remaining objects
     with_lock(datastore_lock) do
-        if length(datastore) > 0
+        if !datastore_empty(false)
             @debug "Failed to cleanup datastore after $evict_delay seconds\nForcibly evicting all entries"
             for id in collect(keys(datastore))
                 state = MemPool.datastore[id]
