@@ -161,7 +161,7 @@ storage_utilized(s::StorageResource) = storage_capacity(s) - storage_available(s
 "Represents CPU RAM."
 struct CPURAMResource <: StorageResource end
 if Sys.islinux()
-function storage_available(::CPURAMResource)
+function free_memory()
     open("/proc/meminfo", "r") do io
         # skip first 2 lines
         readline(io)
@@ -173,9 +173,42 @@ function storage_available(::CPURAMResource)
 end
 else
 # FIXME: Sys.free_memory() includes OS caches
-storage_available(::CPURAMResource) = Sys.free_memory()
+free_memory() = Sys.free_memory()
 end
-storage_capacity(::CPURAMResource) = Sys.total_memory()
+storage_available(::CPURAMResource) = _query_mem_periodically(:available)
+storage_capacity(::CPURAMResource) = _query_mem_periodically(:capacity)
+
+mutable struct QueriedMemInfo
+    value::UInt64
+    last_ns::UInt64
+end
+QueriedMemInfo() = QueriedMemInfo(UInt64(0), UInt64(0))
+const QUERY_MEM_AVAILABLE = Ref(QueriedMemInfo())
+const QUERY_MEM_CAPACITY = Ref(QueriedMemInfo())
+const QUERY_MEM_PERIOD = 10 * 1000^2 # 10ms
+function _query_mem_periodically(kind::Symbol)
+    if !(kind in (:available, :capacity))
+        throw(ArgumentError("Invalid memory query kind: $kind"))
+    end
+    mem_bin = if kind == :available
+        QUERY_MEM_AVAILABLE
+    elseif kind == :capacity
+        QUERY_MEM_CAPACITY
+    end
+    mem_info = mem_bin[]
+    now_ns = time_ns()
+    if mem_info.last_ns < now_ns - QUERY_MEM_PERIOD
+        if kind == :available
+            new_mem_info = QueriedMemInfo(free_memory(), now_ns)
+        elseif kind == :capacity
+            new_mem_info = QueriedMemInfo(Sys.total_memory(), now_ns)
+        end
+        mem_bin[] = new_mem_info
+        return new_mem_info.value
+    else
+        return mem_info.value
+    end
+end
 
 "Represents a filesystem mounted at a given path."
 struct FilesystemResource <: StorageResource
