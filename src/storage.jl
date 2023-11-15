@@ -950,12 +950,14 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
         end
 
         # Update counters
+        to_delete = Int[]
         for oref in Iterators.map(idx->from_refs[idx], write_list)
             push!(to_refs, oref)
             if !(!to_mem && sra.retain[])
-                deleteat!(from_refs, findfirst(==(oref), from_refs))
+                push!(to_delete, findfirst(==(oref), from_refs))
             end
         end
+        foreach(idx->deleteat!(from_refs, idx), reverse(to_delete))
 
         @label write_ref
         # Space available, perform migration
