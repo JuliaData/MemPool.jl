@@ -198,7 +198,6 @@ end
             # They know about this DRef
             @assert haskey(MemPool.datastore_counters, $key2)
             # They own it, and are told when others receive it (and we have received it, but they're already aware of that)
-            @show MemPool.datastore_counters[$key2].worker_counter[]
             @assert MemPool.datastore_counters[$key2].worker_counter[] >= 1
             @assert length(MemPool.datastore_counters[$key2].recv_counters) == 0
             # They don't hold a local reference to it
@@ -639,6 +638,23 @@ sra_ondisk_pos(sra, ref, idx) =
     @test isempty(sra.mem_refs)
     @test isempty(sra.device_refs)
     @test length(readdir(dirname)) == 8
+
+    # Counters are properly cleared (https://github.com/JuliaParallel/DTables.jl/issues/60)
+    sra = MemPool.SimpleRecencyAllocator(8*10, sdevice2, 8*10_000, :LRU)
+    function generate()
+        poolset(collect(1:10); device=sra)
+        poolset(collect(1:10); device=sra)
+        return
+    end
+    generate()
+    @test sra.mem_size[] > 0
+    @test sra.device_size[] > 0
+    for _ in 1:3
+        GC.gc()
+        yield()
+    end
+    @test sra.mem_size[] == 0
+    @test sra.device_size[] == 0
 end
 
 @testset "Mountpoints and Disk Stats" begin
