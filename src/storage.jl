@@ -1013,12 +1013,14 @@ function delete_from_device!(sra::SimpleRecencyAllocator, state::RefState, id::I
         if (idx = findfirst(x->x==id, sra.mem_refs)) !== nothing
             delete_from_device!(CPURAMDevice(), state, id)
             deleteat!(sra.mem_refs, idx)
+            sra.mem_size[] -= state.size
         end
         if (idx = findfirst(x->x==id, sra.device_refs)) !== nothing
             if !sra.retain[]
                 delete_from_device!(sra.device, state, id)
             end
             deleteat!(sra.device_refs, idx)
+            sra.device_size[] -= state.size
         end
         delete!(sra.ref_cache, id)
     end
