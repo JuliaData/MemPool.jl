@@ -521,8 +521,8 @@ function setup_global_device!(cfg::DiskCacheConfig)
         # This detects if a disk cache was already set up
         @warn(
             "Setting the disk cache config when one is already set will lead to " *
-            "unexpected behavior and likely cause issues. Please restart the process" *
-            "before changing the disk cache configuration." *
+            "unexpected behavior and likely cause issues. Please restart the process " *
+            "before changing the disk cache configuration. " *
             "If this warning is unexpected you may need to " *
             "clear the `JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR` ENV."
         )
