@@ -5,6 +5,7 @@ desc = "a simple distributed data store"
 version = "0.4.4"
 
 [deps]
+ConcurrentUtils = "3df5f688-6c4c-4767-8685-17f5ad261477"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
