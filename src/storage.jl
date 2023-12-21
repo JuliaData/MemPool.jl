@@ -315,9 +315,18 @@ mutable struct RefState
     leaf_tag::Tag
     # Destructor, if any
     destructor::Any
+    # A Reader-Writer lock to protect access to this struct
+    lock::CU.ReadWriteLock
+    # The DRef that this value may be redirecting to
+    redirect::Union{DRef,Nothing}
 end
-RefState(storage::StorageState, size::Integer) =
-    RefState(storage, size, nothing, Tag(), nothing)
+RefState(storage::StorageState, size::Integer;
+         tag=nothing, leaf_tag=Tag(),
+         destructor=nothing) =
+    RefState(storage, size,
+             tag, leaf_tag,
+             destructor,
+             CU.ReadWriteLock(), nothing)
 function Base.getproperty(state::RefState, field::Symbol)
     if field === :storage
         throw(ArgumentError("Cannot directly read `:storage` field of `RefState`\nUse `storage_read(state)` instead"))
