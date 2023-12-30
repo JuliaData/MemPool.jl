@@ -246,6 +246,16 @@ end
     end
 end
 
+@testset "Destructors" begin
+    ref_del = Ref(false)
+    # @eval because testsets retain values in weird ways
+    x = @eval Ref{Any}(poolset(123; destructor=()->(@assert !$ref_del[]; $ref_del[]=true;)))
+    @test !ref_del[]
+    x[] = nothing
+    GC.gc(); yield()
+    @test ref_del[]
+end
+
 @testset "StorageState" begin
     sstate1 = MemPool.StorageState(nothing,
                                    MemPool.StorageLeaf[],
@@ -305,7 +315,7 @@ end
                                    CPURAMDevice(),
                                    Base.Event())
     notify(sstate1)
-    state = MemPool.RefState(sstate1, 64, "abc", MemPool.Tag(SerializationFileDevice=>123))
+    state = MemPool.RefState(sstate1, 64, "abc", MemPool.Tag(SerializationFileDevice=>123), nothing)
     @test state.size == 64
     @test MemPool.storage_size(state) == 64
     @test_throws ArgumentError state.storage
