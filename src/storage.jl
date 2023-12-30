@@ -254,7 +254,10 @@ struct Tag
     tags::Dict{Type,Any}
     Tag(tags...) =
         new(Dict{Type,Any}(tags...))
+    Tag(::Nothing) = new(Dict{Type,Any}())
 end
+const EMPTY_TAG = Tag(nothing)
+Tag() = EMPTY_TAG
 Base.getindex(tag::Tag, ::Type{device}) where {device<:StorageDevice} =
     get(tag.tags, device, nothing)
 
