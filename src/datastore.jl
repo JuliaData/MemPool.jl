@@ -375,7 +375,8 @@ isondisk(x::DRef) = isondisk(x.id)
 function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
                  retain=false, restore=false,
                  device=GLOBAL_DEVICE[], leaf_device=initial_leaf_device(device),
-                 tag=nothing, leaf_tag=Tag())
+                 tag=nothing, leaf_tag=Tag(),
+                 destructor=nothing)
     if pid == myid()
         id = atomic_add!(id_counter, 1)
         sstate = if !restore
@@ -392,7 +393,8 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
         state = RefState(sstate,
                          size,
                          tag,
-                         leaf_tag)
+                         leaf_tag,
+                         destructor)
         rc = RefCounters()
         Threads.atomic_add!(rc.local_counter, 1)
         Threads.atomic_add!(rc.worker_counter, 1)
@@ -475,6 +477,10 @@ function datastore_delete(id)
     end)
     @safe_lock_spin datastore_lock begin
         haskey(datastore, id) && delete!(datastore, id)
+    end
+    dtor = state.destructor
+    if dtor !== nothing
+        errormonitor(Threads.@spawn dtor())
     end
     return
 end
