@@ -4,9 +4,9 @@ mutable struct DRef
     owner::Int
     id::Int
     size::UInt
-    function DRef(owner, id, size)
+    function DRef(owner, id, size; doref::Bool=true)
         d = new(owner, id, size)
-        poolref(d)
+        doref && poolref(d)
         finalizer(poolunref, d)
         d
     end
@@ -123,11 +123,33 @@ struct RefCounters
     # Locks for access to send/recv counters
     tx_lock::NonReentrantLock
 end
-RefCounters() = RefCounters(Atomic{Int}(0),
+function RefCounters()
+    rc = maybepop!(REFCOUNTERS_CACHE)
+    if rc === nothing
+        rc = RefCounters(Atomic{Int}(0),
                             Atomic{Int}(0),
                             Dict{Int,Int}(),
                             Dict{Int,Int}(),
                             NonReentrantLock())
+    else
+        Threads.atomic_sub!(REFCOUNTERS_STORED, 1)
+        rc = something(rc)
+    end
+    return rc
+end
+function refcounters_replace!(rc)
+    if REFCOUNTERS_STORED[] < REFCOUNTERS_CACHE_MAX
+        rc.worker_counter[] = 0
+        rc.local_counter[] = 0
+        empty!(rc.send_counters)
+        empty!(rc.recv_counters)
+        Threads.atomic_add!(REFCOUNTERS_STORED, 1)
+        push!(REFCOUNTERS_CACHE, rc)
+    end
+end
+const REFCOUNTERS_CACHE = ConcurrentStack{RefCounters}()
+const REFCOUNTERS_STORED = Threads.Atomic{Int}(0)
+const REFCOUNTERS_CACHE_MAX = 2^12
 
 Base.show(io::IO, ctrs::RefCounters) = with_lock(ctrs.tx_lock) do
     print(io, string(ctrs))
@@ -259,7 +281,7 @@ function poolref(d::DRef, recv=false)
         # We've never seen this DRef, so tell the owner
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "!! (", d.owner, ", ", d.id, ") at ", myid(), "\n")
         if myid() == d.owner
-            poolref_owner(d.id)
+            poolref_owner(d.id, ctrs)
         else
             _enqueue_work(remotecall_wait, poolref_owner, d.owner, d.id)
         end
@@ -274,10 +296,12 @@ function poolref(d::DRef, recv=false)
     end
 end
 "Called on owner when a worker first holds a reference to DRef with ID `id`."
-function poolref_owner(id::Int)
+function poolref_owner(id::Int, ctrs=nothing)
     free = false
-    ctrs = with_lock(()->datastore_counters[(myid(), id)],
-                     datastore_counters_lock)
+    if ctrs === nothing
+        ctrs = with_lock(()->datastore_counters[(myid(), id)],
+                         datastore_counters_lock)
+    end
     update_and_check_owner!(ctrs, id, 1)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "== (", myid(), ", ", id, ")\n")
 end
@@ -422,12 +446,12 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
         sstate = if !restore
             StorageState(Some{Any}(x),
                          Vector{StorageLeaf}(),
-                         CPURAMDevice())
+                         device)
         else
             @assert !isa(leaf_device, CPURAMDevice) "Cannot use `CPURAMDevice()` as leaf device when `restore=true`"
             StorageState(nothing,
                          [StorageLeaf(leaf_device, Some{Any}(x), retain)],
-                         leaf_device)
+                         device)
         end
         notify(sstate)
         state = RefState(sstate,
@@ -435,18 +459,17 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
                          tag,
                          leaf_tag,
                          destructor)
+        rc = RefCounters()
+        Threads.atomic_add!(rc.local_counter, 1)
+        Threads.atomic_add!(rc.worker_counter, 1)
         with_lock(datastore_counters_lock) do
-            datastore_counters[(pid, id)] = RefCounters()
+            datastore_counters[(pid, id)] = rc
         end
         with_lock(datastore_lock) do
             datastore[id] = state
         end
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "++ (", myid(), ", ", id, ") [", x, "]\n")
-        d = DRef(myid(), id, size)
-        # Switch the root
-        notify(storage_rcu!(state) do sstate
-            StorageState(sstate; root=device)
-        end)
+        d = DRef(myid(), id, size; doref=false)
         if !(restore && device === leaf_device)
             try
                 write_to_device!(device, state, id)
@@ -502,6 +525,8 @@ end
 function datastore_delete(id)
     @safe_lock_spin datastore_counters_lock begin
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-- (", myid(), ", ", id, ") with ", string(datastore_counters[(myid(), id)]), "\n"; gc_context=true)
+        ctrs = datastore_counters[(myid(), id)]
+        refcounters_replace!(ctrs)
         delete!(datastore_counters, (myid(), id))
     end
     state = @safe_lock_spin datastore_lock begin
