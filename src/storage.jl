@@ -186,6 +186,7 @@ QueriedMemInfo() = QueriedMemInfo(UInt64(0), UInt64(0))
 const QUERY_MEM_AVAILABLE = Ref(QueriedMemInfo())
 const QUERY_MEM_CAPACITY = Ref(QueriedMemInfo())
 const QUERY_MEM_PERIOD = 10 * 1000^2 # 10ms
+const QUERY_MEM_OVERRIDE = ScopedValue(false)
 function _query_mem_periodically(kind::Symbol)
     if !(kind in (:available, :capacity))
         throw(ArgumentError("Invalid memory query kind: $kind"))
@@ -197,7 +198,7 @@ function _query_mem_periodically(kind::Symbol)
     end
     mem_info = mem_bin[]
     now_ns = time_ns()
-    if mem_info.last_ns < now_ns - QUERY_MEM_PERIOD
+    if QUERY_MEM_OVERRIDE[] || mem_info.last_ns < now_ns - QUERY_MEM_PERIOD
         if kind == :available
             new_mem_info = QueriedMemInfo(free_memory(), now_ns)
         elseif kind == :capacity

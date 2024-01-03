@@ -5,6 +5,7 @@ import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, mmwrite, mmread, cleanup
 import .Threads: ReentrantLock
 using ConcurrentCollections
+using ScopedValues
 
 ## Wrapping-unwrapping of payloads:
 
