@@ -309,9 +309,11 @@ mutable struct RefState
     # Metadata to associate with the reference
     tag::Any
     leaf_tag::Tag
+    # Destructor, if any
+    destructor::Any
 end
 RefState(storage::StorageState, size::Integer) =
-    RefState(storage, size, nothing, Tag())
+    RefState(storage, size, nothing, Tag(), nothing)
 function Base.getproperty(state::RefState, field::Symbol)
     if field === :storage
         throw(ArgumentError("Cannot directly read `:storage` field of `RefState`\nUse `storage_read(state)` instead"))
