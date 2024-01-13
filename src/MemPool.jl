@@ -4,6 +4,7 @@ using Serialization, Sockets, Random
 import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, mmwrite, mmread, cleanup
 import .Threads: ReentrantLock
+using ScopedValues
 
 ## Wrapping-unwrapping of payloads:
 
@@ -116,6 +117,10 @@ function __init__()
 
     DISKCACHE_CONFIG[] = diskcache_config = DiskCacheConfig()
     setup_global_device!(diskcache_config)
+
+    if haskey(ENV, "JULIA_MEMPOOL_MEMORY_RESERVED")
+        MEM_RESERVED[] = parse(UInt, ENV["JULIA_MEMPOOL_MEMORY_RESERVED"])
+    end
 
     # Ensure we cleanup all references
     atexit(exit_hook)
