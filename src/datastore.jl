@@ -392,6 +392,11 @@ satisfied, or `max_sweeps` number of cycles have elapsed.
 function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=5)
     sat_sub(x::T, y::T) where T = x < y ? zero(T) : x-y
 
+    # Do a quick (cached) check, to optimize for many calls to this function when memory isn't tight
+    if Int(storage_available(CPURAMResource())) - size >= MEM_RESERVED[]
+        return
+    end
+
     # Check whether the OS is running tight on memory
     sweep_ctr = 0
     while true
@@ -400,7 +405,7 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=5)
         end || break
 
         # We need more memory! Let's encourage the GC to clear some memory...
-        sweep_start = time_ns()
+        sweep_start = fasttime()
         mem_used = with(QUERY_MEM_OVERRIDE => true) do
             storage_utilized(CPURAMResource())
         end
