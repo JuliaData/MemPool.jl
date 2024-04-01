@@ -197,7 +197,7 @@ function _query_mem_periodically(kind::Symbol)
         QUERY_MEM_CAPACITY
     end
     mem_info = mem_bin[]
-    now_ns = time_ns()
+    now_ns = fasttime()
     if QUERY_MEM_OVERRIDE[] || mem_info.last_ns < now_ns - QUERY_MEM_PERIOD[]
         if kind == :available
             new_mem_info = QueriedMemInfo(free_memory(), now_ns)

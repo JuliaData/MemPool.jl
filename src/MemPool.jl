@@ -54,6 +54,7 @@ approx_size(f::FileRef) = f.size
 
 include("io.jl")
 include("lock.jl")
+include("clock.jl")
 include("datastore.jl")
 
 """
