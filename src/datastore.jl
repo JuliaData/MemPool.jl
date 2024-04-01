@@ -1,4 +1,5 @@
 using Distributed
+import ConcurrentUtils as CU
 
 mutable struct DRef
     owner::Int
@@ -455,7 +456,7 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
         end
         notify(sstate)
         state = RefState(sstate,
-                         size,
+                         size;
                          tag,
                          leaf_tag,
                          destructor)
@@ -504,22 +505,48 @@ function forwardkeyerror(f)
     end
 end
 
-function poolget(r::DRef)
-    DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "?? (", r.owner, ", ", r.id, ") at ", myid(), "\n")
-    if r.owner == myid()
-        _getlocal(r.id, false)
+function poolget(ref::DRef)
+    DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "?? (", ref.owner, ", ", ref.id, ") at ", myid(), "\n")
+    original_ref = ref
+
+    # Check global redirect cache
+    ref = CU.lock_read(REDIRECT_CACHE_LOCK) do
+        get(REDIRECT_CACHE, ref, ref)
+    end
+
+    # Fetch the value (or a RedirectTo) from the owner
+    @label fetch
+    value = if ref.owner == myid()
+        _getlocal(ref.id, false)
     else
         forwardkeyerror() do
-            remotecall_fetch(r.owner, r) do r
-                MMWrap(_getlocal(r.id, true))
+            remotecall_fetch(ref.owner, ref) do ref
+                MMWrap(_getlocal(ref.id, true))
             end
         end
     end |> unwrap_payload
+
+    if value isa RedirectTo
+        # Redirected to a new ref, update the cache and try again
+        @lock REDIRECT_CACHE_LOCK begin
+            REDIRECT_CACHE[ref] = value.ref
+            REDIRECT_CACHE[original_ref] = value.ref
+        end
+        ref = value.ref
+        @goto fetch
+    end
+
+    return something(value)
 end
 
 function _getlocal(id, remote)
     state = with_lock(()->datastore[id], datastore_lock)
-    return read_from_device(storage_read(state).root, state, id, true)
+    CU.lock_read(state.lock) do
+        if state.redirect !== nothing
+            return RedirectTo(state.redirect)
+        end
+        return Some{Any}(read_from_device(state, id, true))
+    end
 end
 
 function datastore_delete(id)
@@ -549,11 +576,59 @@ function datastore_delete(id)
     return
 end
 
+## DRef migration/redirection
+
+"""
+    migrate!(ref::DRef, to::Integer) -> DRef
+
+Migrate the data referenced by `ref` to another worker `to`, returning the new
+`DRef` which references the new data. The existing `ref` is still usable, and
+any accesses via `poolget` will seamlessly redirect to the new `DRef`, but the
+data is no longer stored on the same worker as `ref`.
+"""
+function migrate!(ref::DRef, to::Integer)
+    @assert ref.owner != to "Cannot migrate a DRef within the same worker"
+    if ref.owner != myid()
+        return remotecall_fetch(migrate!, ref.owner, ref, to)
+    end
+    state = with_lock(()->datastore[ref.id], datastore_lock)
+
+    # Lock the ref against further accesses
+    # FIXME: Below is racey w.r.t data mutation
+    local new_ref
+    @lock state.lock begin
+        # Read the current value of the ref
+        data = read_from_device(state, ref, true)
+
+        # Create new ref to redirect to
+        new_ref = remotecall_fetch(poolset, to, data)
+
+        # Set the redirect to our new ref
+        state.redirect = new_ref
+
+        # Delete the local data
+        delete_from_device!(state, ref)
+    end
+
+    return new_ref
+end
+
+struct RedirectTo
+    ref::DRef
+end
+
+const REDIRECT_CACHE = WeakKeyDict{DRef,DRef}()
+const REDIRECT_CACHE_LOCK = CU.ReadWriteLock()
+
+## Default data directory
+
 const SESSION = Ref{String}()
 
 default_dir(p) = joinpath(homedir(), ".mempool", "$(SESSION[])-$p")
 default_dir() = default_dir(myid())
 default_path(r::DRef) = joinpath(default_dir(r.owner), string(r.id))
+
+## Disk caching configuration
 
 """
     DiskCacheConfig

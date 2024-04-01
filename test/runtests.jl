@@ -256,6 +256,25 @@ end
     @test ref_del[]
 end
 
+@testset "Migration" begin
+    A = WeakRef([1,2,3])
+    x = poolset(A.value)
+    poolget(x)
+
+    x_new = MemPool.migrate!(x, 2)
+    @test x_new isa DRef
+    @test x_new !== x
+    @test x_new.owner == 2
+    @test poolget(x_new) == [1,2,3]
+    @test poolget(x) == [1,2,3]
+
+    @test MemPool.storage_read(MemPool.datastore[x.id]).data === nothing
+    #= FIXME
+    GC.gc(); yield()
+    @test A.value === nothing
+    =#
+end
+
 @testset "StorageState" begin
     sstate1 = MemPool.StorageState(nothing,
                                    MemPool.StorageLeaf[],
@@ -315,7 +334,9 @@ end
                                    CPURAMDevice(),
                                    Base.Event())
     notify(sstate1)
-    state = MemPool.RefState(sstate1, 64, "abc", MemPool.Tag(SerializationFileDevice=>123), nothing)
+    state = MemPool.RefState(sstate1, 64;
+                             tag="abc",
+                             leaf_tag=MemPool.Tag(SerializationFileDevice=>123))
     @test state.size == 64
     @test MemPool.storage_size(state) == 64
     @test_throws ArgumentError state.storage

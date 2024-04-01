@@ -6,6 +6,7 @@ version = "0.4.6"
 
 [deps]
 ConcurrentCollections = "5060bff5-0b44-40c5-b522-fcd3ca5cecdd"
+ConcurrentUtils = "3df5f688-6c4c-4767-8685-17f5ad261477"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
@@ -16,6 +17,7 @@ Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 
 [compat]
 ConcurrentCollections = "0.1"
+ConcurrentUtils = "0.1"
 DataStructures = "0.18"
 ScopedValues = "1"
 julia = "1.8"
