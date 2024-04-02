@@ -79,8 +79,13 @@ end
 warn_dref_serdes() = @warn "Performing serialization of DRef with unknown serializer\nThis may fail or produce incorrect results" maxlog=1
 
 # Ensure we call the DRef ctor
-Base.copy(d::DRef) = deepcopy(d)
-Base.deepcopy(d::DRef) = DRef(d.owner, d.id, d.size)
+Base.copy(d::DRef) = DRef(d.owner, d.id, d.size)
+function Base.deepcopy_internal(d::DRef, stackdict::IdDict)
+    if haskey(stackdict, d)
+        return stackdict[d]
+    end
+    return DRef(d.owner, d.id, d.size)
+end
 
 include("storage.jl")
 
