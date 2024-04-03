@@ -879,8 +879,10 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
     # and go to the "to" device. The passed-in ref is inserted into the
     # "from" device.
     if ismissing(to_mem)
-        # Try to minimize reads/writes
-        sstate = storage_read(state)
+        # Try to minimize reads/writes. Note the type assertion to help the
+        # compiler with inference, this removes some Base._any() invalidations.
+        sstate::StorageState = storage_read(state)
+
         if sstate.data !== nothing
             # Try to keep it in memory
             to_mem = true
