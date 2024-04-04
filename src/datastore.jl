@@ -1,5 +1,4 @@
 using Distributed
-import ConcurrentUtils as CU
 
 mutable struct DRef
     owner::Int
@@ -515,7 +514,7 @@ function poolget(ref::DRef)
     original_ref = ref
 
     # Check global redirect cache
-    ref = CU.lock_read(REDIRECT_CACHE_LOCK) do
+    ref = lock_read(REDIRECT_CACHE_LOCK) do
         get(REDIRECT_CACHE, ref, ref)
     end
 
@@ -546,7 +545,7 @@ end
 
 function _getlocal(id, remote)
     state = with_lock(()->datastore[id], datastore_lock)
-    CU.lock_read(state.lock) do
+    lock_read(state.lock) do
         if state.redirect !== nothing
             return RedirectTo(state.redirect)
         end
@@ -623,7 +622,7 @@ struct RedirectTo
 end
 
 const REDIRECT_CACHE = WeakKeyDict{DRef,DRef}()
-const REDIRECT_CACHE_LOCK = CU.ReadWriteLock()
+const REDIRECT_CACHE_LOCK = ReadWriteLock()
 
 ## Default data directory
 
