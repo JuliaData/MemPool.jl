@@ -382,6 +382,7 @@ isondisk(x::DRef) = isondisk(x.id)
 
 const MEM_RESERVED = Ref{UInt}(512 * (1024^2)) # Reserve 512MB of RAM for OS
 const MEM_RESERVE_LOCK = Threads.ReentrantLock()
+const MEM_RESERVE_SWEEPS = Ref{Int}(3)
 
 """
 When called, ensures that at least `MEM_RESERVED[] + size` bytes are available
@@ -389,8 +390,10 @@ to the OS. If there is not enough memory available, then a variety of calls to
 the GC are performed to free up memory until either the reservation limit is
 satisfied, or `max_sweeps` number of cycles have elapsed.
 """
-function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=5)
+function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE_SWEEPS[])
     sat_sub(x::T, y::T) where T = x < y ? zero(T) : x-y
+
+    max_sweeps == 0 && return
 
     # Do a quick (cached) check, to optimize for many calls to this function when memory isn't tight
     if Int(storage_available(CPURAMResource())) - size >= MEM_RESERVED[]
@@ -432,7 +435,7 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=5)
         end
 
         sweep_ctr += 1
-        if sweep_ctr == max_sweeps
+        if sweep_ctr >= max_sweeps
             @debug "Made too many sweeps, bailing out..."
             break
         end
