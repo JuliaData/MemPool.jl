@@ -16,6 +16,7 @@ jobs:
           - '~1.8'
           - '~1.9'
           - '~1.10'
+          - '~1.11'
           - 'nightly'
       fail-fast: false
     name: Test with Julia ${{ matrix.julia-version }}
