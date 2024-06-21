@@ -393,6 +393,8 @@ satisfied, or `max_sweeps` number of cycles have elapsed.
 function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE_SWEEPS[])
     sat_sub(x::T, y::T) where T = x < y ? zero(T) : x-y
 
+    max_sweeps == 0 && return
+
     # Do a quick (cached) check, to optimize for many calls to this function when memory isn't tight
     if Int(storage_available(CPURAMResource())) - size >= MEM_RESERVED[]
         return
@@ -433,7 +435,7 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
         end
 
         sweep_ctr += 1
-        if sweep_ctr == max_sweeps
+        if sweep_ctr >= max_sweeps
             @debug "Made too many sweeps, bailing out..."
             break
         end
