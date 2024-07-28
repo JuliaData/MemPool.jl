@@ -1,7 +1,7 @@
 ##### Array{T} #####
 using Mmap
 
-struct MMSer{T} end # sentinal type used in deserialize to switch to our
+struct MMSer{T} end # sentinel type used in deserialize to switch to our
                     # custom memory-mapping deserializers
 
 can_mmap(io::IOStream) = true
@@ -93,7 +93,7 @@ end
 
 ##### Array{String} #####
 
-const UNDEF_LENGTH = typemax(UInt32) # if your string is exaclty 4GB you're out of luck
+const UNDEF_LENGTH = typemax(UInt32) # if your string is exactly 4GB you're out of luck
 
 function mmwrite(io::AbstractSerializer, xs::Array{String})
     Serialization.serialize_type(io, MMSer{typeof(xs)})
