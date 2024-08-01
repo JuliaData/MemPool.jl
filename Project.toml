@@ -2,7 +2,7 @@ name = "MemPool"
 uuid = "f9f48841-c794-520a-933b-121f7ba6ed94"
 license = "MIT"
 desc = "a simple distributed data store"
-version = "0.4.8"
+version = "0.4.9"
 
 [deps]
 ConcurrentCollections = "5060bff5-0b44-40c5-b522-fcd3ca5cecdd"
