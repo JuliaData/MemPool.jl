@@ -425,7 +425,7 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
         yield()
 
         # Wait for send queue to clear
-        while SEND_QUEUE.processing
+        while SEND_QUEUE.processing || !isempty(SEND_QUEUE.queue)
             yield()
         end
 
