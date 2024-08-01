@@ -63,8 +63,12 @@ include("datastore.jl")
 
 Returns the size of `d` in bytes used for accounting in MemPool datastore.
 """
-function approx_size(@nospecialize(d))
-    Base.summarysize(d) # note: this is accurate but expensive
+function approx_size(d::T) where T
+    if Base.datatype_pointerfree(T)
+        return sizeof(d)
+    else
+        Base.summarysize(d) # note: this is accurate but expensive
+    end
 end
 
 function approx_size(d::Union{Base.BitInteger, Float16, Float32, Float64})
