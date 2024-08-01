@@ -385,7 +385,7 @@ const MEM_RESERVE_LOCK = Threads.ReentrantLock()
 const MEM_RESERVE_SWEEPS = Ref{Int}(3)
 
 """
-When called, ensures that at least `MEM_RESERVED[] + size` bytes are available
+When called, ensures that at least `MEM_RESERVED[]` bytes are available
 to the OS. If there is not enough memory available, then a variety of calls to
 the GC are performed to free up memory until either the reservation limit is
 satisfied, or `max_sweeps` number of cycles have elapsed.
@@ -396,7 +396,7 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
     max_sweeps == 0 && return
 
     # Do a quick (cached) check, to optimize for many calls to this function when memory isn't tight
-    if Int(storage_available(CPURAMResource())) - size >= MEM_RESERVED[]
+    if Int(storage_available(CPURAMResource())) >= MEM_RESERVED[]
         return
     end
 
@@ -404,7 +404,7 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
     sweep_ctr = 0
     while true
         with(QUERY_MEM_OVERRIDE => true) do
-            Int(storage_available(CPURAMResource())) - size < MEM_RESERVED[]
+            Int(storage_available(CPURAMResource())) < MEM_RESERVED[]
         end || break
 
         # We need more memory! Let's encourage the GC to clear some memory...
@@ -425,7 +425,7 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
         yield()
 
         # Wait for send queue to clear
-        while SEND_QUEUE.processing
+        while SEND_QUEUE.processing || !isempty(SEND_QUEUE.queue)
             yield()
         end
 

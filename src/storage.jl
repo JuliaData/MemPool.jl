@@ -163,12 +163,11 @@ struct CPURAMResource <: StorageResource end
 if Sys.islinux()
 function free_memory()
     open("/proc/meminfo", "r") do io
-        # skip first 2 lines
-        readline(io)
-        readline(io)
-        line = readline(io)
-        free = match(r"MemAvailable:\s*([0-9]*)\s.*", line).captures[1]
-        parse(UInt64, free) * 1024
+        # TODO: Cache in TLS
+        buf = zeros(UInt8, 128)
+        readbytes!(io, buf)
+        free = match(r"MemAvailable:\s*([0-9]*)\s.*", String(buf)).captures[1]
+        return parse(UInt64, free) * 1024
     end
 end
 else
