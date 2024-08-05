@@ -597,10 +597,10 @@ Migrate the data referenced by `ref` to another worker `to`, returning the new
 any accesses via `poolget` will seamlessly redirect to the new `DRef`, but the
 data is no longer stored on the same worker as `ref`.
 """
-function migrate!(ref::DRef, to::Integer; pre_migration=nothing, post_migration=nothing)
+function migrate!(ref::DRef, to::Integer; pre_migration=nothing, dest_post_migration=nothing, post_migration=nothing)
     @assert ref.owner != to "Cannot migrate a DRef within the same worker"
     if ref.owner != myid()
-        return remotecall_fetch(migrate!, ref.owner, ref, to; pre_migration, post_migration)
+        return remotecall_fetch(migrate!, ref.owner, ref, to; pre_migration, dest_post_migration, post_migration)
     end
     state = with_lock(()->datastore[ref.id], datastore_lock)
 
@@ -612,12 +612,20 @@ function migrate!(ref::DRef, to::Integer; pre_migration=nothing, post_migration=
         data = read_from_device(state, ref, true)
 
         # Prepare data for migration
-        if pre_migration !== nothing
+        pre_migration_data = if pre_migration !== nothing
             pre_migration(data)
+        else
+            nothing
         end
 
         # Create new ref to redirect to
-        new_ref = remotecall_fetch(poolset, to, data)
+        new_ref = remotecall_fetch(to, data) do
+            new_ref = poolset(data)
+            if dest_post_migration !== nothing
+                access_ref(dest_post_migration, new_ref, pre_migration_data; local_only=true)
+            end
+            return new_ref
+        end
 
         # Set the redirect to our new ref
         state.redirect = new_ref
