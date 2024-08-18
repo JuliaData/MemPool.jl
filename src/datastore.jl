@@ -619,7 +619,7 @@ function migrate!(ref::DRef, to::Integer; pre_migration=nothing, dest_post_migra
         end
 
         # Create new ref to redirect to
-        new_ref = remotecall_fetch(to, data) do
+        new_ref = remotecall_fetch(to, data) do data
             new_ref = poolset(data)
             if dest_post_migration !== nothing
                 access_ref(dest_post_migration, new_ref, pre_migration_data; local_only=true)
