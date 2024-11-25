@@ -1,4 +1,10 @@
-using Distributed
+if @load_preference("distributed-package") == "DistributedNext"
+    using DistributedNext
+    import DistributedNext: ClusterSerializer, worker_id_from_socket
+else
+    using Distributed
+    import Distributed: ClusterSerializer, worker_id_from_socket
+end
 
 mutable struct DRef
     owner::Int
@@ -26,13 +32,13 @@ function Serialization.serialize(io::AbstractSerializer, d::DRef)
 
     _pooltransfer_send(io, d)
 end
-function _pooltransfer_send(io::Distributed.ClusterSerializer, d::DRef)
-    pid = Distributed.worker_id_from_socket(io.io)
+function _pooltransfer_send(io::ClusterSerializer, d::DRef)
+    pid = worker_id_from_socket(io.io)
     if pid != -1
         pooltransfer_send_local(d, pid)
         return
     end
-    pid = Distributed.worker_id_from_socket(io)
+    pid = worker_id_from_socket(io)
     if pid != -1
         pooltransfer_send_local(d, pid)
         return
@@ -60,7 +66,7 @@ function Serialization.deserialize(io::AbstractSerializer, dt::Type{DRef})
     _pooltransfer_recv(io, d)
     return d
 end
-function _pooltransfer_recv(io::Distributed.ClusterSerializer, d)
+function _pooltransfer_recv(io::ClusterSerializer, d)
     # Add a new reference manually, and unref on finalization
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "<- (", d.owner, ", ", d.id, ") at ", myid(), "\n")
     poolref(d, true)

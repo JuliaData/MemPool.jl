@@ -1,5 +1,6 @@
 module MemPool
 
+import Preferences: @load_preference, @set_preferences!
 using Serialization, Sockets, Random
 import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, mmwrite, mmread, cleanup
@@ -51,6 +52,20 @@ end
 unwrap_payload(f::FileRef) = unwrap_payload(open(deserialize, f.file, "r+"))
 
 approx_size(f::FileRef) = f.size
+
+# Preferences settings
+
+"""
+    set_distributed_package!(value[="Distributed|DistributedNext"])
+
+Set a [preference](https://github.com/JuliaPackaging/Preferences.jl) for using
+either the Distributed.jl stdlib or DistributedNext.jl. You will need to restart
+Julia after setting a new preference.
+"""
+function set_distributed_package!(value)
+    @set_preferences!("distributed-package" => value)
+    @info "MemPool.jl preference has been set, restart your Julia session for this change to take effect!"
+end
 
 include("io.jl")
 include("lock.jl")
