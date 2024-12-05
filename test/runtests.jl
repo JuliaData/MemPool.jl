@@ -855,6 +855,17 @@ end
     MemPool.retain_on_device!(sdevice, x1, false)
 end
 
+@testset "Preferences" begin
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project -E 'using MemPool; parentmodule(MemPool.addprocs)'`
+
+    cd(dirname(Base.active_project())) do
+        @test readchomp(cmd) == "Distributed"
+
+        MemPool.set_distributed_package!("DistributedNext")
+        @test readchomp(cmd) == "DistributedNext"
+    end
+end
+
 #= TODO
 Allocate, write non-CPU A, write non-CPU B, handle for A was explicitly deleted
 Allocate, chain write and reads such that write starts before, and finishes after, read, ensure ordering is correct
