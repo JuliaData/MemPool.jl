@@ -1,7 +1,5 @@
 # Adapted from ConcurrentUtils/src/read_write_lock.jl
 
-import UnsafeAtomics
-
 abstract type AbstractReadWriteLock <: Base.AbstractLock end
 
 const NOTLOCKED = UInt64(0)
@@ -67,7 +65,7 @@ function lock_read(rwlock::ReadWriteLock)
         pointer_from_objref(rwlock) + OFFSET_NREADERS_AND_WRITELOCK,
     )
     GC.@preserve rwlock begin
-        _, n = UnsafeAtomics.modify!(ptr, +, NREADERS_INC, UnsafeAtomics.acq_rel)
+        _, n = Core.Intrinsics.atomic_pointermodify(ptr, +, NREADERS_INC, :acquire_release)
     end
     # n = @atomic :acquire_release rwlock.nreaders_and_writelock += NREADERS_INC
 
@@ -93,7 +91,7 @@ function unlock_read(rwlock::ReadWriteLock)
         pointer_from_objref(rwlock) + OFFSET_NREADERS_AND_WRITELOCK,
     )
     GC.@preserve rwlock begin
-        _, n = UnsafeAtomics.modify!(ptr, -, NREADERS_INC, UnsafeAtomics.acq_rel)
+        _, n = Core.Intrinsics.atomic_pointermodify(ptr, -, NREADERS_INC, :acquire_release)
     end
     # n = @atomic :acquire_release rwlock.nreaders_and_writelock -= NREADERS_INC
 
