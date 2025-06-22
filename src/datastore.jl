@@ -386,7 +386,7 @@ isondisk(id::Int) =
 isinmemory(x::DRef) = isinmemory(x.id)
 isondisk(x::DRef) = isondisk(x.id)
 
-const MEM_RESERVED = Ref{UInt}(512 * (1024^2)) # Reserve 512MB of RAM for OS
+const MEM_RESERVED = Ref{UInt}(0) # O to avoid excessive GC
 const MEM_RESERVE_LOCK = Threads.ReentrantLock()
 const MEM_RESERVE_SWEEPS = Ref{Int}(3)
 
