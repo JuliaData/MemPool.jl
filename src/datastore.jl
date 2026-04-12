@@ -10,7 +10,8 @@ end
     DRef(owner::Int, id::Int, size::UInt)
 
 A Distributed Reference (DRef)  which acts as a handle to store data in MemPool.
-It tracks which worker 'owner' holds the data and a unique 'id' assigned to the data
+It tracks which worker 'owner' holds the data and a unique 'id' assigned to the data.
+'size' stores an aproximation of the in-memory byte size of the object.
 """
 mutable struct DRef
     owner::Int
@@ -461,7 +462,7 @@ end
     poolset(x, [pid]; kwargs...) -> DRef
     
 Stores the value 'x' into the memory pool on worker 'pid' (defaults to myid())
-and returns a 'DRef' handle
+and returns a 'DRef' handle that can be used to later access the value. 
 """
 function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
                  retain=false, restore=false,
@@ -536,10 +537,10 @@ function forwardkeyerror(f)
 end
 
 """
-    poolget(ref::Dref)
+    poolget(ref::DRef)
 
 Retrieves the data value referenced by 'ref'. If the data is remote or 
-on disk, MemPool handles the retrieval automatically
+on disk, MemPool handles the retrieval automatically.
 """
 function poolget(ref::DRef)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "?? (", ref.owner, ", ", ref.id, ") at ", myid(), "\n")
