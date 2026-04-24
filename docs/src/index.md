@@ -82,6 +82,11 @@ cfg = MemPool.DiskCacheConfig(
 MemPool.setup_global_device!(cfg)
 ```
 
+When the amount of data tracked by MemPool exceeds `membound` in byte size,
+MemPool will perform activities such as triggering a GC sweep, or swapping other
+data to `diskpath` and removing that other data from memory. Note that `diskpath`
+must be a directory - each piece of data gets it own file.
+
 ## Memory Reservation Logic
 
 MemPool includes a `ensure_memory_reserved` mechanism. When a `poolset` is called, the system checks if the OS is running
