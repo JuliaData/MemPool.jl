@@ -13,8 +13,10 @@ data management for libraries or applications - Dagger.jl is one such library th
 MemPool for this purpose.
 
 
-Note: when using MemPool with multiple workers, make sure that the workers are
-initialized *before* importing MemPool This ensures the package is loaded on all nodes:
+### Remote Workers Caveat
+
+When using MemPool with multiple workers, make sure that the workers are
+initialized *before* importing MemPool. This ensures the package is loaded on all nodes:
 ```julia-repl
 julia> using Distributed
 
