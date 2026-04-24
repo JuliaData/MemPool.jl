@@ -64,7 +64,8 @@ from `rand(500)` on worker 2, and will not share memory with the original array.
 
 ## Quickstart: Out-of-Core Configuration
 
-When `membound` is reached, MemPool will trigger a GC sweep or move data to the `diskpath`.
+MemPool provides helper functions to setup out-of-core data management for all
+`DRef`s created with `poolset`.
 
 ### Enabling the Disk Cache
 
