@@ -21,5 +21,5 @@ warnonly = [:missing_docs]
 
 deploydocs(;
 repo = "github.com/JuliaParallel/MemPool.jl",
-devbranch = "main", # Or "master", check your repo's default branch
+devbranch = "master",
 )
