@@ -47,8 +47,8 @@ ref = poolset(A)
 A_retrieved = poolget(ref)
 ```
 This will track a large array (`A`) as a `DRef` using `poolset(A)`. 
-If you wanted to clear the data from local scope and retrive it later 
-from the `DRef`, run `poolget(ref)`.
+You can now safely clear the reference `A` (such as by `A = nothing`),
+and later retrieve `A` from the `DRef` using `poolget(ref)`.
 
 
 ### Manual Worker Assignment
