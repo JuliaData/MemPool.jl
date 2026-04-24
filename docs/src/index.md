@@ -124,9 +124,9 @@ API, which uses it to migrate streaming tasks to other workers while they run.
 Treat files as managed `DRef` objects to avoid loading massive datasets into RAM all at once:
 
 ```julia
-#Create a lazy refence to a serialized Julia file
-f = MemPool.File("large_dataset.jls")
+#Create a lazy refence (handled by dagger)
+f = Dagger.File("large_dataset.jls")
 
-#Data is only loaded when explicitly requested
-data = poolget(f)
+#When you fetch, MemPool manages the resulting memory
+data = fetch(f)
 ```
