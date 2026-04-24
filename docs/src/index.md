@@ -36,7 +36,8 @@ to data that might live in local RAM, remote RAM, or on disk.
 
 ### Creating and retreiving data
 
-Use `poolset` to register data with the pool and `poolget` to retreive the actual value
+Use `poolset` to register data with the pool and `poolget` to retrieve the actual value:
+
 ```julia
 using MemPool
 
