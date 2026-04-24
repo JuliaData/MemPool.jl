@@ -9,7 +9,7 @@ repo = GitHub("JuliaParallel", "MemPool.jl"),
 sitename = "MemPool.jl",
 format = Documenter.HTML(;
 prettyurls = get(ENV, "CI", "false") == "true",
-canonical = "https://JuliaParallel.github.io/MemPool.jl",
+canonical = "https://juliaparallel.github.io/MemPool.jl",
 assets = String["assets/favicon.ico"],
 ),
 pages = [
@@ -21,5 +21,5 @@ warnonly = [:missing_docs]
 
 deploydocs(;
 repo = "github.com/JuliaParallel/MemPool.jl",
-devbranch = "main", # Or "master", check your repo's default branch
+devbranch = "master",
 )
