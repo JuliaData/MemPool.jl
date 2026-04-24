@@ -101,9 +101,9 @@ tuning `MemPool.MEM_RESERVED[]` (this is specified in terms of the minimum numbe
 of bytes that must be free for use by the OS).
 
 
-### Quickstart: Persistence & Migration
+## Quickstart: Persistence & Migration
 
-## Migrating Data Between Workers
+### Migrating Data Between Workers
 
 You can move data from one worker to another without breaking existing references:
 
