@@ -119,7 +119,7 @@ This can be very helpful to seamlessly migrate data when it would be more effici
 to read the data from another worker. Dagger.jl uses this mechanism for its streaming
 API, which uses it to migrate streaming tasks to other workers while they run.
 
-## Managed File I/O
+### Managed File I/O
 
 Treat files as managed `DRef` objects to avoid loading massive datasets into RAM all at once:
 
