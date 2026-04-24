@@ -46,7 +46,7 @@ ref = poolset(A)
 
 A_retrieved = poolget(ref)
 ```
-This will move a large array (A) into a ref using `poolset(A)`. 
+This will track a large array (`A`) as a `DRef` using `poolset(A)`. 
 If you wanted to clear the data from local scope and retrive it later 
 from the `DRef`, run `poolget(ref)`.
 
