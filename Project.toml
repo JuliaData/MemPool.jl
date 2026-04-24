@@ -18,7 +18,7 @@ Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 
 [compat]
 ConcurrentCollections = "0.1"
-DataStructures = "0.18"
+DataStructures = "0.18, 0.19"
 DistributedNext = "1"
 Preferences = "1"
 ScopedValues = "1"
