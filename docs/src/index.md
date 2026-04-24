@@ -66,7 +66,8 @@ from `rand(500)` on worker 2, and will not share memory with the original array.
 
 When `membound` is reached, MemPool will trigger a GC sweep or move data to the `diskpath`.
 
-## Enabling the Disk Cache
+### Enabling the Disk Cache
+
 ```julia
 # 1. Define the configuration
 cfg = MemPool.DiskCacheConfig(
