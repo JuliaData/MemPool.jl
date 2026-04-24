@@ -113,6 +113,12 @@ existing `DRef` references:
 new_ref = MemPool.migrate!(ref, 3)
 ```
 
+While it does return `new_ref` (a reference to the newly-copied data on worker 3),
+accesses to `ref` will also automatically redirect to `new_ref` during `poolget`.
+This can be very helpful to seamlessly migrate data when it would be more efficient
+to read the data from another worker. Dagger.jl uses this mechanism for its streaming
+API, which uses it to migrate streaming tasks to other workers while they run.
+
 ## Managed File I/O
 
 Treat files as managed `DRef` objects to avoid loading massive datasets into RAM all at once:
