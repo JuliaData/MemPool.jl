@@ -105,7 +105,8 @@ of bytes that must be free for use by the OS).
 
 ### Migrating Data Between Workers
 
-You can move data from one worker to another without breaking existing references:
+If necessary, data can be moved (copied) from one worker to another, without breaking
+existing `DRef` references:
 
 ```julia
 # Move data from current owner to worker 3
