@@ -10,7 +10,7 @@ sitename = "MemPool.jl",
 format = Documenter.HTML(;
 prettyurls = get(ENV, "CI", "false") == "true",
 canonical = "https://juliaparallel.github.io/MemPool.jl",
-assets = String["assets/favicon.ico"],
+/*assets = String["assets/favicon.ico"],*/
 ),
 pages = [
 "Home" => "index.md",
