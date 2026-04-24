@@ -31,7 +31,7 @@ julia> using MemPool
 
 For more details: [Data Management](@ref)
 
-The core of MemPool revolves around `DRef`(Distributed Reference). A `DRef` is a pointer
+The core of MemPool revolves around the `DRef` (Distributed Reference). A `DRef` is a pointer
 to data that might live in local RAM, remote RAM, or on disk.
 
 ### Creating and retreiving data
