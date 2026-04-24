@@ -89,11 +89,16 @@ must be a directory - each piece of data gets it own file.
 
 ### Memory Reservation Logic
 
-MemPool includes a `ensure_memory_reserved` mechanism. When a `poolset` is called, the system checks if the OS is running
-tight on memory. If so, it will:
+MemPool includes an `ensure_memory_reserved` mechanism, which prevents memory
+usage from exceeding a set global memory boundary. When a `poolset` is called,
+the system checks if the OS is running tight on memory. If so, it will:
 1. Trigger a local GC.
 2. If memory is still tight, trigger a full `GC.gc(true)`.
 3. Finally, trigger a cluster-wide GC (`@everywhere GC.gc(true)`). 
+
+This mechanism is separate from the `DiskCacheConfig` logic, and can be configured by
+tuning `MemPool.MEM_RESERVED[]` (this is specified in terms of the minimum number
+of bytes that must be free for use by the OS).
 
 
 ### Quickstart: Persistence & Migration
