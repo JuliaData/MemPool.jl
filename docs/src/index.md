@@ -1,9 +1,16 @@
 # MemPool: A framework for out-of-core and parallel execution
 
-MemPool.jl acts as a gatekeeper and looks at its internal table of "chunks". If space exists
-for a DAG, it tells the Dagger Scheduler that it is good to run. It then handles the 
-bit-by-bit transfer of data from where it is (RAM/Disk) into that GPU's memory. If there is
-no space and it is full, it tells the Scheduler that the capacity is reached. 
+MemPool.jl is both a framework and in-memory datababse for storing and accessing Julia
+objects, where those objects may live on local or remote (distributed) Julia processes.
+This allows for communicating about data stored on remote workers, and even data
+potentially paged-out to disk, with a single simple reference (the `DRef`).
+
+As a database, MemPool stores references to objects, and also acts as a "gatekeeper"
+when those objects are later accessed through their reference. It can be configured to
+page data out to disk, and then when data is accessed, will page out other data to make
+space in RAM for this newly-loaded data. This allows MemPool to provide "out-of-core"
+data management for libraries or applications - Dagger.jl is one such library that utilizes
+MemPool for this purpose.
 
 
 Note: when using MemPool with multiple workers, make sure that the workers are
