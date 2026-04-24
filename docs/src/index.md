@@ -59,6 +59,9 @@ You can force data to be stored on a specific worker by passing a worker ID to '
 ref_w2 = poolset(rand(500), 2)
 ```
 
+Note that if the current worker is not worker 2, this will make a copy of the array
+from `rand(500)` on worker 2, and will not share memory with the original array.
+
 ### Quickstart: Out-of-Core Configuration
 
 When `membound` is reached, MemPool will trigger a GC sweep or move data to the `diskpath`.
