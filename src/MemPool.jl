@@ -6,7 +6,6 @@ import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, mmwrite, mmread, cleanup
 import .Threads: ReentrantLock
 using ScopedValues
-using ConcurrentCollections
 
 ## Wrapping-unwrapping of payloads:
 
@@ -70,6 +69,7 @@ end
 include("io.jl")
 include("lock.jl")
 include("read_write_lock.jl")
+include("stack.jl")
 include("clock.jl")
 include("datastore.jl")
 
