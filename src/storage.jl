@@ -858,12 +858,12 @@ end
 
 # For convenience and backwards-compatibility
 """
-    SerializationFileDevice === GenericFileDevice{serialize,deserialize,true,true}
+    SerializationFileDevice === GenericFileDevice{serialize,deserialize,true,false}
 
 Stores data using the `Serialization` stdlib to serialize and deserialize data.
 See `GenericFileDevice` for further details.
 """
-const SerializationFileDevice = GenericFileDevice{serialize,deserialize,true,true}
+const SerializationFileDevice = GenericFileDevice{serialize,deserialize,true,false}
 
 """
     SimpleRecencyAllocator <: StorageDevice
