@@ -210,6 +210,85 @@ function _query_mem_periodically(kind::Symbol)
     end
 end
 
+# --- Shared logical-memory accounting ---------------------------------------
+#
+# Multiple storage allocators may independently decide to keep data resident in
+# CPU RAM (e.g. the built-in `SimpleRecencyAllocator`, and external allocators
+# such as Dagger's Datadeps allocator). Without a shared accounting of how many
+# bytes are logically reserved in memory, each allocator assumes it owns the
+# whole budget, and the sum of their resident footprints can overcommit physical
+# RAM ("split-brain"). `MemoryAccounting` is a single per-worker, process-local
+# budget that participating allocators reserve from before promoting data to
+# memory, and release to when demoting it to a slower device or deleting it.
+#
+# The default budget is unbounded (`typemax`), so allocators that opt in see no
+# behavior change until a limit is set via `set_mem_limit!`.
+mutable struct MemoryAccounting
+    # Total logical CPU-RAM budget (bytes) shared across participating
+    # allocators on this worker. `typemax(UInt64)` means unbounded.
+    limit::UInt64
+    # Currently reserved (resident) bytes across participating allocators.
+    reserved::UInt64
+    lock::Threads.SpinLock
+end
+MemoryAccounting(limit::Integer=typemax(UInt64)) =
+    MemoryAccounting(UInt64(limit), UInt64(0), Threads.SpinLock())
+
+"The global, per-worker shared logical-memory budget. See [`MemoryAccounting`](@ref)."
+const GLOBAL_MEM_ACCOUNTING = MemoryAccounting()
+
+"The shared logical CPU-RAM budget in bytes (`typemax` if unbounded)."
+mem_limit(acc::MemoryAccounting=GLOBAL_MEM_ACCOUNTING) = @lock acc.lock acc.limit
+"Set the shared logical CPU-RAM budget to `n` bytes (`typemax` to disable)."
+function set_mem_limit!(n::Integer, acc::MemoryAccounting=GLOBAL_MEM_ACCOUNTING)
+    @lock acc.lock acc.limit = UInt64(n)
+    return UInt64(n)
+end
+"Bytes currently reserved (resident) against the shared budget."
+mem_reserved(acc::MemoryAccounting=GLOBAL_MEM_ACCOUNTING) = @lock acc.lock acc.reserved
+"Bytes still reservable against the shared budget (`typemax` if unbounded)."
+function mem_available(acc::MemoryAccounting=GLOBAL_MEM_ACCOUNTING)
+    @lock acc.lock begin
+        acc.limit == typemax(UInt64) && return typemax(UInt64)
+        return acc.reserved >= acc.limit ? UInt64(0) : acc.limit - acc.reserved
+    end
+end
+
+"""
+    mem_reserve!(n; force=false, acc=GLOBAL_MEM_ACCOUNTING) -> Bool
+
+Attempt to reserve `n` bytes of logical CPU-RAM from the shared budget. Returns
+`true` if the reservation succeeded (or the budget is unbounded), and `false` if
+it would exceed the limit. When `force=true`, the reservation always succeeds
+and the counter is incremented regardless (the budget may be temporarily
+exceeded); use this when the data must be made resident no matter what (e.g. a
+forced swap-in, or by an allocator that maintains its own independent limit).
+"""
+function mem_reserve!(n::Integer, acc::MemoryAccounting=GLOBAL_MEM_ACCOUNTING; force::Bool=false)
+    n = UInt64(n)
+    @lock acc.lock begin
+        if force || acc.limit == typemax(UInt64) || acc.reserved + n <= acc.limit
+            acc.reserved += n
+            return true
+        end
+        return false
+    end
+end
+
+"""
+    mem_release!(n; acc=GLOBAL_MEM_ACCOUNTING)
+
+Release `n` bytes previously reserved with [`mem_reserve!`](@ref), saturating at
+zero so spurious double-releases cannot underflow the counter.
+"""
+function mem_release!(n::Integer, acc::MemoryAccounting=GLOBAL_MEM_ACCOUNTING)
+    n = UInt64(n)
+    @lock acc.lock begin
+        acc.reserved = acc.reserved >= n ? acc.reserved - n : UInt64(0)
+    end
+    return
+end
+
 "Represents a filesystem mounted at a given path."
 struct FilesystemResource <: StorageResource
     mountpoint::String
@@ -968,8 +1047,12 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
                 push!(write_list, idx)
                 if !(!to_mem && sra.retain[])
                     from_size[] -= oref_size
+                    # `from` is CPU RAM when promoting the passed ref to memory
+                    to_mem && mem_release!(oref_size)
                 end
                 to_size[] += oref_size
+                # `to` is CPU RAM when demoting the passed ref to disk
+                to_mem || mem_reserve!(oref_size; force=true)
             end
             idx += (to_mem ? -1 : 1) * (sra.policy == :LRU ? 1 : -1)
         end
@@ -1005,6 +1088,8 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
         # Space available, perform migration
         pushfirst!(from_refs, ref_id)
         from_size[] += state.size
+        # `from` is CPU RAM when promoting the passed ref to memory
+        to_mem && mem_reserve!(state.size; force=true)
         sstate = storage_read(state)
         if findfirst(l->l.device === from_device, sstate.leaves) === nothing
             # If this ref isn't already on the target device
@@ -1021,6 +1106,8 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
             delete_from_device!(to_device, state, ref_id)
             deleteat!(to_refs, findfirst(x->x==ref_id, to_refs))
             to_size[] -= state.size
+            # `to` is CPU RAM when demoting the passed ref to disk
+            to_mem || mem_release!(state.size)
         end
 
         @label write_done
@@ -1056,6 +1143,7 @@ function delete_from_device!(sra::SimpleRecencyAllocator, state::RefState, id::I
             delete_from_device!(CPURAMDevice(), state, id)
             deleteat!(sra.mem_refs, idx)
             sra.mem_size[] -= state.size
+            mem_release!(state.size)
         end
         if (idx = findfirst(x->x==id, sra.device_refs)) !== nothing
             if !sra.retain[]
