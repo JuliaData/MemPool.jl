@@ -688,6 +688,135 @@ sra_ondisk_pos(sra, ref, idx) =
     @test sra.device_size[] == 0
 end
 
+@testset "Pinning" begin
+    @testset "Basic pin/unpin counting" begin
+        x = poolset([1,2,3])
+        state = MemPool.datastore[x.id]
+        @test !MemPool.ispinned(state)
+        @test !MemPool.ispinned(x)
+        @test !MemPool.ispinned(x.id)
+
+        # Pinning increments the counter
+        @test poolpin(x) === nothing
+        @test MemPool.ispinned(x)
+        @test state.pin_counter[] == 1
+
+        # Pinning is reference-counted
+        poolpin(x)
+        @test state.pin_counter[] == 2
+
+        # Unpinning decrements, but stays pinned until counter hits zero
+        @test poolunpin(x) === nothing
+        @test MemPool.ispinned(x)
+        @test state.pin_counter[] == 1
+        poolunpin(x)
+        @test !MemPool.ispinned(x)
+        @test state.pin_counter[] == 0
+
+        # Unpinning more than pinning is an error
+        @test_throws Exception poolunpin(x)
+    end
+
+    @testset "Pin guards CPURAMDevice swap-out" begin
+        # Back the ref with an on-disk leaf, so dropping the in-memory copy is a
+        # swap-out (the data still exists on disk) rather than a total deletion
+        sdevice = SerializationFileDevice(mktempdir())
+        x = poolset([1,2,3]; device=sdevice)
+        @test MemPool.isinmemory(x)
+        @test MemPool.isondisk(x)
+        poolpin(x)
+
+        # Swapping out a pinned ref's in-memory data throws
+        @test_throws Exception MemPool.delete_from_device!(CPURAMDevice(), x)
+        # The data is still present and accessible
+        @test MemPool.isinmemory(x)
+        @test poolget(x) == [1,2,3]
+
+        # Once unpinned, swap-out is permitted again
+        poolunpin(x)
+        MemPool.delete_from_device!(CPURAMDevice(), x)
+        @test storage_read(MemPool.datastore[x.id]).data === nothing
+    end
+
+    @testset "Pin allows total deletion" begin
+        # A memory-only ref (no other leaves) can have its data deleted even
+        # while pinned, since this removes the DRef's data entirely
+        x = poolset([1,2,3])
+        @test isempty(storage_read(MemPool.datastore[x.id]).leaves)
+        poolpin(x)
+        MemPool.delete_from_device!(CPURAMDevice(), x)
+        @test storage_read(MemPool.datastore[x.id]).data === nothing
+        poolunpin(x)
+    end
+
+    @testset "Pin swaps data into memory" begin
+        sdevice = SerializationFileDevice(mktempdir())
+        x = poolset([1,2,3]; device=sdevice)
+        # Drop the in-memory copy, leaving data only on disk
+        MemPool.delete_from_device!(CPURAMDevice(), x)
+        @test !MemPool.isinmemory(x)
+        @test MemPool.isondisk(x)
+
+        # Pinning swaps the data back into memory
+        poolpin(x)
+        @test MemPool.isinmemory(x)
+        @test MemPool.ispinned(x)
+        poolunpin(x)
+    end
+
+    @testset "Pin prevents SRA eviction" begin
+        sdevice = SerializationFileDevice()
+        sra = MemPool.SimpleRecencyAllocator(8*10, sdevice, 8*10_000, :LRU)
+
+        # r1 is the oldest (least-recently-used) ref, but we pin it
+        r1 = poolset([1,2]; device=sra)        # 16 bytes
+        poolpin(r1)
+        r2 = poolset([1,2,3]; device=sra)      # 24 bytes
+        r3 = poolset([1,2,3,4,5]; device=sra)  # 40 bytes
+
+        # Memory is now full ([r3, r2, r1] == 80 bytes), with r1 the LRU entry
+        @test sra_inmem_pos(sra, r3, 1)
+        @test sra_inmem_pos(sra, r2, 2)
+        @test sra_inmem_pos(sra, r1, 3)
+
+        # Adding r4 forces an eviction; under LRU, r1 would normally be evicted
+        # first, but it is pinned, so the allocator must evict r2 and r3 instead
+        r4 = poolset([1,2,3,4,5]; device=sra)  # 40 bytes
+
+        # The pinned ref stayed resident in memory
+        @test MemPool.isinmemory(r1)
+        @test sra_upper_pos(sra, r1) !== nothing
+        @test sra_lower_pos(sra, r1) === nothing
+        # The unpinned refs were evicted to disk
+        @test sra_ondisk_pos(sra, r2, 1)
+        @test sra_ondisk_pos(sra, r3, 2)
+        @test sra_inmem_pos(sra, r4, 1)
+
+        # After unpinning, r1 may be evicted like any other ref
+        poolunpin(r1)
+        @test !MemPool.ispinned(r1)
+        # Touch r2/r3 to make r1 the LRU entry, then force more evictions
+        r5 = poolset([1,2,3,4,5]; device=sra)  # 40 bytes
+        r6 = poolset([1,2,3,4,5]; device=sra)  # 40 bytes
+        @test MemPool.isondisk(r1)
+        @test !MemPool.isinmemory(r1)
+        # Data remains correct throughout
+        @test poolget(r1) == [1,2]
+    end
+
+    @testset "Remote pin/unpin" begin
+        r = poolset([1,2,3], 2)
+        rid = r.id
+        @test r.owner == 2
+
+        poolpin(r)
+        @test fetch(@spawnat 2 MemPool.ispinned(rid))
+
+        poolunpin(r)
+        @test fetch(@spawnat 2 !MemPool.ispinned(rid))
+    end
+end
+
 @testset "Mountpoints and Disk Stats" begin
     mounts = MemPool.mountpoints()
     @test mounts isa Vector{String}

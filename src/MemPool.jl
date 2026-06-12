@@ -3,7 +3,7 @@ module MemPool
 import Preferences: @load_preference, @set_preferences!
 using Serialization, Sockets, Random
 import Serialization: serialize, deserialize
-export DRef, FileRef, poolset, poolget, mmwrite, mmread, cleanup
+export DRef, FileRef, poolset, poolget, poolpin, poolunpin, mmwrite, mmread, cleanup
 import .Threads: ReentrantLock
 using ScopedValues
 

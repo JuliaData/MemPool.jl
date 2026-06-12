@@ -574,6 +574,80 @@ function _getlocal(f, id, remote, args...; local_only::Bool, from::Int)
     end
 end
 
+"""
+    poolpin(ref::DRef)
+
+Pins the in-memory data referenced by `ref`, marking it as in-use so that
+storage devices (such as the `SimpleRecencyAllocator`) will not swap the data
+out of memory. If the data is not currently resident in memory, it is first
+swapped in. Each call to `poolpin` increments a per-`DRef` pin counter; the data
+remains pinned until a matching number of `poolunpin` calls are made.
+
+This is intended for external users (such as Dagger) which acquire the
+underlying data via `poolget` and need to ensure that it remains valid in
+memory for as long as it is being used. Be sure to call [`poolunpin`](@ref) once
+the data is no longer in use, otherwise the data will remain in memory
+indefinitely.
+"""
+function poolpin(ref::DRef)
+    if ref.owner != myid()
+        remotecall_wait(poolpin, ref.owner, ref)
+        return
+    end
+    @label retry
+    state = with_lock(()->datastore[ref.id], datastore_lock)
+    redir = lock_read(()->state.redirect, state.lock)
+    if redir !== nothing
+        ref = redir
+        if ref.owner != myid()
+            remotecall_wait(poolpin, ref.owner, ref)
+            return
+        end
+        @goto retry
+    end
+    # Mark as pinned before swapping in, so that the swap-in cannot be
+    # immediately undone by a concurrent eviction
+    Threads.atomic_add!(state.pin_counter, 1)
+    try
+        # Ensure the data is resident in memory
+        read_from_device(state, ref.id, false)
+    catch
+        # Roll back the pin if we failed to swap in
+        Threads.atomic_sub!(state.pin_counter, 1)
+        rethrow()
+    end
+    return
+end
+
+"""
+    poolunpin(ref::DRef)
+
+Unpins the in-memory data referenced by `ref`, reversing a previous call to
+[`poolpin`](@ref). Once the pin counter for `ref` reaches zero, the data is once
+again eligible to be swapped out of memory by storage devices. It is an error to
+call `poolunpin` more times than `poolpin` for a given `DRef`.
+"""
+function poolunpin(ref::DRef)
+    if ref.owner != myid()
+        remotecall_wait(poolunpin, ref.owner, ref)
+        return
+    end
+    @label retry
+    state = with_lock(()->datastore[ref.id], datastore_lock)
+    redir = lock_read(()->state.redirect, state.lock)
+    if redir !== nothing
+        ref = redir
+        if ref.owner != myid()
+            remotecall_wait(poolunpin, ref.owner, ref)
+            return
+        end
+        @goto retry
+    end
+    old = Threads.atomic_sub!(state.pin_counter, 1)
+    @assert old >= 1 "poolunpin called more times than poolpin for DRef ($(ref.owner), $(ref.id))"
+    return
+end
+
 function datastore_delete(id)
     @safe_lock_spin datastore_counters_lock begin
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-- (", myid(), ", ", id, ") with ", string(datastore_counters[(myid(), id)]), "\n"; gc_context=true)
