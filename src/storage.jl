@@ -973,7 +973,8 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
                 push!(to_delete, findfirst(==(oref), from_refs))
             end
         end
-        foreach(idx->deleteat!(from_refs, idx), reverse(to_delete))
+        # N.B. Delete highest indices first so earlier indices stay valid
+        foreach(idx->deleteat!(from_refs, idx), sort!(to_delete; rev=true))
 
         @label write_ref
         # Space available, perform migration
