@@ -533,7 +533,8 @@ function poolset_positional(@nospecialize(x), pid, size,
                          leaf_tag,
                          destructor,
                          nothing,
-                         nothing)
+                         nothing,
+                         0)
         rc = RefCounters()
         Threads.atomic_add!(rc.local_counter, 1)
         Threads.atomic_add!(rc.worker_counter, 1)
@@ -708,6 +709,94 @@ function _try_inline_delete!(state::RefState)
     @atomic :release state.storage = StorageState(nothing, NO_LEAVES, root,
                                                   ALWAYS_READY)
     return true
+end
+
+# Reads `state`'s redirect target, if any.
+#
+# `redirect` is only ever written by `migrate!`, which takes the ref's lock via
+# `getlock!` *before* writing it. So observing a `nothing` lock proves that no
+# migration has ever begun on this ref, and therefore that the redirect is
+# `nothing` — which lets us skip the read lock without racing an in-flight
+# migration, and without `getlock!` allocating a lock for a ref that may never
+# otherwise need one.
+function redirect_read(state::RefState)
+    lk = @atomic :acquire state.lock
+    lk === nothing && return nothing
+    return @lock_read lk state.redirect
+end
+
+"""
+    poolpin(ref::DRef)
+
+Pins the in-memory data referenced by `ref`, marking it as in-use so that
+storage devices (such as the `SimpleRecencyAllocator`) will not swap the data
+out of memory. If the data is not currently resident in memory, it is first
+swapped in. Each call to `poolpin` increments a per-`DRef` pin counter; the data
+remains pinned until a matching number of `poolunpin` calls are made.
+
+This is intended for external users (such as Dagger) which acquire the
+underlying data via `poolget` and need to ensure that it remains valid in
+memory for as long as it is being used. Be sure to call [`poolunpin`](@ref) once
+the data is no longer in use, otherwise the data will remain in memory
+indefinitely.
+"""
+function poolpin(ref::DRef)
+    if ref.owner != myid()
+        remotecall_wait(poolpin, ref.owner, ref)
+        return
+    end
+    @label retry
+    state = @safe_lock datastore_lock datastore[ref.id]
+    redir = redirect_read(state)
+    if redir !== nothing
+        ref = redir
+        if ref.owner != myid()
+            remotecall_wait(poolpin, ref.owner, ref)
+            return
+        end
+        @goto retry
+    end
+    # Mark as pinned before swapping in, so that the swap-in cannot be
+    # immediately undone by a concurrent eviction
+    @atomic :acquire_release state.pin_counter += 1
+    try
+        # Ensure the data is resident in memory
+        read_from_device(state, ref.id, false)
+    catch
+        # Roll back the pin if we failed to swap in
+        @atomic :acquire_release state.pin_counter -= 1
+        rethrow()
+    end
+    return
+end
+
+"""
+    poolunpin(ref::DRef)
+
+Unpins the in-memory data referenced by `ref`, reversing a previous call to
+[`poolpin`](@ref). Once the pin counter for `ref` reaches zero, the data is once
+again eligible to be swapped out of memory by storage devices. It is an error to
+call `poolunpin` more times than `poolpin` for a given `DRef`.
+"""
+function poolunpin(ref::DRef)
+    if ref.owner != myid()
+        remotecall_wait(poolunpin, ref.owner, ref)
+        return
+    end
+    @label retry
+    state = @safe_lock datastore_lock datastore[ref.id]
+    redir = redirect_read(state)
+    if redir !== nothing
+        ref = redir
+        if ref.owner != myid()
+            remotecall_wait(poolunpin, ref.owner, ref)
+            return
+        end
+        @goto retry
+    end
+    new = @atomic :acquire_release state.pin_counter -= 1
+    @assert new >= 0 "poolunpin called more times than poolpin for DRef ($(ref.owner), $(ref.id))"
+    return
 end
 
 function datastore_delete(id)

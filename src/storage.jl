@@ -332,6 +332,11 @@ mutable struct RefState
     @atomic lock::Union{ReadWriteLock,Nothing}
     # The DRef that this value may be redirecting to
     redirect::Union{DRef,Nothing}
+    # Number of outstanding pins on the in-memory data. While positive, the
+    # data must remain resident in memory and must not be swapped out. This is
+    # an inline atomic field rather than a `Threads.Atomic{Int}` so that refs,
+    # which are almost never pinned, pay no allocation for it.
+    @atomic pin_counter::Int
 end
 RefState(storage::StorageState, size::Integer;
          tag=nothing, leaf_tag=Tag(),
@@ -339,7 +344,7 @@ RefState(storage::StorageState, size::Integer;
     RefState(storage, size,
              tag, leaf_tag,
              destructor,
-             nothing, nothing)
+             nothing, nothing, 0)
 
 """
     getlock!(state::RefState) -> ReadWriteLock
@@ -375,6 +380,17 @@ function Base.setproperty!(state::RefState, field::Symbol, value)
 end
 Base.show(io::IO, state::RefState) =
     print(io, "RefState(size=$(Base.format_bytes(state.size)), tag=$(getfield(state, :tag)), leaf_tag=$(getfield(state, :leaf_tag)))")
+
+"""
+    ispinned(state::RefState) -> Bool
+
+Returns `true` if the reference identified by `state` is currently pinned (its
+in-memory data is in use and must not be swapped out), and `false` otherwise.
+See [`poolpin`](@ref) and [`poolunpin`](@ref) for further details.
+"""
+ispinned(state::RefState) = (@atomic :acquire state.pin_counter) > 0
+ispinned(id::Int) = ispinned(@safe_lock datastore_lock datastore[id])
+ispinned(ref::DRef) = (@assert ref.owner == myid(); ispinned(ref.id))
 
 function tag_read(state::RefState, sstate::StorageState, device::StorageDevice)
     if sstate.root === device
@@ -629,6 +645,13 @@ function read_from_device(::CPURAMDevice, state::RefState, ref_id::Int, ret::Boo
     end
 end
 function delete_from_device!(::CPURAMDevice, state::RefState, ref_id::Int)
+    # If the data only lives in memory (no other leaves), then deleting it is a
+    # total deletion of the DRef's data, which is allowed even when pinned (the
+    # DRef is being removed entirely). Otherwise, this is a swap-out, which must
+    # not happen while pinned.
+    if ispinned(state) && !isempty(storage_read(state).leaves)
+        throw(ConcurrencyViolationError("Cannot swap out pinned DRef $ref_id from CPURAMDevice\nThe reference's in-memory data is still in use; call `poolunpin` first"))
+    end
     notify(storage_rcu!(state) do sstate
         StorageState(sstate; data=nothing)
     end)
@@ -968,8 +991,11 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
             oref = from_refs[idx]
             oref_state = sra.ref_cache[oref]
             oref_size = oref_state.size
-            if (to_mem && sra.retain[]) || ((oref_size + to_size[] <= to_limit) &&
-                                            !isretained(oref_state, from_device))
+            # Never evict a pinned ref from memory; its data is in use and must
+            # stay resident. Skip it and look for another eviction candidate.
+            pin_ok = !(to_mem && ispinned(oref_state))
+            if pin_ok && ((to_mem && sra.retain[]) || ((oref_size + to_size[] <= to_limit) &&
+                                            !isretained(oref_state, from_device)))
                 # Retention is active while demoting to device, or else destination has space for this ref
                 push!(write_list, idx)
                 if !(!to_mem && sra.retain[])
