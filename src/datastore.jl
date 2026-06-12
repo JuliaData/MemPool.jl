@@ -81,7 +81,9 @@ function _pooltransfer_recv(io::AbstractSerializer, d)
     poolunref(d)
 end
 
-warn_dref_serdes() = @warn "Performing serialization of DRef with unknown serializer\nThis may fail or produce incorrect results" maxlog=1
+function warn_dref_serdes()
+    @warn "Performing serialization of DRef with unknown serializer\nThis may fail or produce incorrect results" maxlog=1
+end
 
 # Ensure we call the DRef ctor
 Base.copy(d::DRef) = DRef(d.owner, d.id, d.size)
@@ -757,8 +759,25 @@ function poolpin(ref::DRef)
         @goto retry
     end
     # Mark as pinned before swapping in, so that the swap-in cannot be
-    # immediately undone by a concurrent eviction
-    @atomic :acquire_release state.pin_counter += 1
+    # immediately undone by a concurrent eviction.
+    #
+    # If this ref is managed by a `SimpleRecencyAllocator`, serialize the pin
+    # mark with that allocator's lock. `sra_migrate!` holds the SRA lock across
+    # its whole "select unpinned victims -> evict them" critical section; without
+    # this, a pin could land *between* the victim-selection check and the actual
+    # swap-out, so the allocator would try to demote a ref that just became
+    # pinned and throw. Taking the SRA lock only around the atomic mark (never
+    # around the swap-in below) closes that window without re-entering the
+    # non-reentrant SRA lock: a concurrent migration either marks-then-skips this
+    # ref, or fully evicts it before we mark and we simply swap it back in.
+    sra = _sra_root_device(state)
+    if sra === nothing
+        @atomic :acquire_release state.pin_counter += 1
+    else
+        @safe_lock sra.lock begin
+            @atomic :acquire_release state.pin_counter += 1
+        end
+    end
     try
         # Ensure the data is resident in memory
         read_from_device(state, ref.id, false)
@@ -768,6 +787,13 @@ function poolpin(ref::DRef)
         rethrow()
     end
     return
+end
+
+# The `SimpleRecencyAllocator` managing `state`'s data, or `nothing` if it is not
+# SRA-managed. Used by `poolpin` to serialize pin marks with SRA migration.
+function _sra_root_device(state::RefState)
+    root = storage_read(state).root
+    return root isa SimpleRecencyAllocator ? root : nothing
 end
 
 """
