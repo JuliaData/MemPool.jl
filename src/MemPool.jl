@@ -66,6 +66,7 @@ function set_distributed_package!(value)
     @info "MemPool.jl preference has been set, restart your Julia session for this change to take effect!"
 end
 
+include("logging.jl")
 include("io.jl")
 include("lock.jl")
 include("read_write_lock.jl")
