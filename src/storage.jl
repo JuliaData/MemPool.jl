@@ -782,20 +782,23 @@ function write_to_device!(device::GenericFileDevice{S,D,F,M}, state::RefState, r
     sstate = storage_rcu!(state) do sstate
         StorageState(sstate; leaves=vcat(sstate.leaves, leaf))
     end
+    write_sz = state.size
     errormonitor(Threads.@spawn begin
-        if F
-            open(path, "w+") do io
-                for (write_filt, ) in reverse(device.filters)
-                    io = write_filt(io)
+        @mplog :mempool_write_device (;ref=ref_id, size=write_sz, u=next_log_id()) nothing begin
+            if F
+                open(path, "w+") do io
+                    for (write_filt, ) in reverse(device.filters)
+                        io = write_filt(io)
+                    end
+                    S(io, (M ? MMWrap : identity)(data))
+                    close(io)
                 end
-                S(io, (M ? MMWrap : identity)(data))
-                close(io)
+            else
+                if length(device.filters) > 0
+                    throw(ArgumentError("Cannot use filters with $(typeof(device))\nPlease use a different device if filtering is required"))
+                end
+                S(path, data)
             end
-        else
-            if length(device.filters) > 0
-                throw(ArgumentError("Cannot use filters with $(typeof(device))\nPlease use a different device if filtering is required"))
-            end
-            S(path, data)
         end
         leaf.handle = Some{Any}(fref)
         notify(sstate)
@@ -814,19 +817,22 @@ function read_from_device(device::GenericFileDevice{S,D,F,M}, state::RefState, i
     sstate = storage_rcu!(state) do sstate
         StorageState(sstate)
     end
+    read_sz = state.size
     errormonitor(Threads.@spawn begin
-        data = if F
-            open(fref.file, "r") do io
-                for (_, read_filt) in reverse(device.filters)
-                    io = read_filt(io)
+        data = @mplog :mempool_read_device (;ref=id, size=read_sz, u=next_log_id()) nothing begin
+            if F
+                open(fref.file, "r") do io
+                    for (_, read_filt) in reverse(device.filters)
+                        io = read_filt(io)
+                    end
+                    (M ? unwrap_payload : identity)(D(io))
                 end
-                (M ? unwrap_payload : identity)(D(io))
+            else
+                if length(device.filters) > 0
+                    throw(ArgumentError("Cannot use filters with $(typeof(device))\nPlease use a different device if filtering is required"))
+                end
+                D(fref.file)
             end
-        else
-            if length(device.filters) > 0
-                throw(ArgumentError("Cannot use filters with $(typeof(device))\nPlease use a different device if filtering is required"))
-            end
-            D(fref.file)
         end
         sstate.data = Some{Any}(data)
         notify(sstate)
@@ -849,7 +855,9 @@ function delete_from_device!(device::GenericFileDevice, state::RefState, id::Int
     else
         fref = something(leaf.handle)
         errormonitor(Threads.@spawn begin
-            rm(fref.file; force=true)
+            @mplog :mempool_delete_device (;ref=id, u=next_log_id()) nothing begin
+                rm(fref.file; force=true)
+            end
             notify(new_sstate)
         end)
     end
@@ -954,6 +962,9 @@ function storage_utilized(sra::SimpleRecencyAllocator, res::StorageResource)
 end
 storage_utilized(sra::SimpleRecencyAllocator) = sra.mem_size[] + sra.device_size[]
 function write_to_device!(sra::SimpleRecencyAllocator, state::RefState, ref_id::Int)
+    _logging = logging_enabled()
+    _wid = _logging ? (;ref=ref_id, size=state.size, u=next_log_id()) : nothing
+    _logging && mp_timespan_start(:mempool_sra_write, _wid, nothing)
     with_lock(sra.lock) do
         sra.ref_cache[ref_id] = state
     end
@@ -968,6 +979,8 @@ function write_to_device!(sra::SimpleRecencyAllocator, state::RefState, ref_id::
             delete!(sra.ref_cache, ref_id)
         end
         rethrow(err)
+    finally
+        _logging && mp_timespan_finish(:mempool_sra_write, _wid, nothing)
     end
     return
 end

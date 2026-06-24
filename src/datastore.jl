@@ -99,19 +99,26 @@ include("storage.jl")
 storage_read(state::RefState) = @atomic :acquire state.storage
 "Atomically replaces `state.storage` with the result of `f(state.storage)`."
 function storage_rcu!(f, state::RefState)
-    while true
-        orig_sstate = @atomic :acquire state.storage
+    _logging = LOG_FINE[] && logging_enabled()
+    _rcuid = _logging ? (;u=next_log_id()) : nothing
+    _logging && mp_timespan_start(:mempool_storage_rcu, _rcuid, nothing)
+    try
+        while true
+            orig_sstate = @atomic :acquire state.storage
 
-        # Generate new state based on old state
-        new_sstate = f(orig_sstate)
+            # Generate new state based on old state
+            new_sstate = f(orig_sstate)
 
-        if new_sstate === orig_sstate
-            throw(ConcurrencyViolationError("Attempted to atomically replace StorageState with itself"))
+            if new_sstate === orig_sstate
+                throw(ConcurrencyViolationError("Attempted to atomically replace StorageState with itself"))
+            end
+            succ = (@atomicreplace :acquire_release :acquire state.storage orig_sstate => new_sstate).success
+            if succ
+                return new_sstate
+            end
         end
-        succ = (@atomicreplace :acquire_release :acquire state.storage orig_sstate => new_sstate).success
-        if succ
-            return new_sstate
-        end
+    finally
+        _logging && mp_timespan_finish(:mempool_storage_rcu, _rcuid, nothing)
     end
 end
 
@@ -408,6 +415,13 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
         return
     end
 
+    # Memory is tight: we may force GC sweeps below. Time this region so the cost
+    # of reserve-driven GC pauses is visible in the unified timeline.
+    _logging = logging_enabled()
+    _gcid = _logging ? (;reserve=MEM_RESERVED[], u=next_log_id()) : nothing
+    _logging && mp_timespan_start(:mempool_mem_reserve_gc, _gcid, nothing)
+    try
+
     # Check whether the OS is running tight on memory
     sweep_ctr = 0
     while true
@@ -451,6 +465,10 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
     if sweep_ctr > 0
         @debug "Swept for $sweep_ctr cycles"
     end
+
+    finally
+        _logging && mp_timespan_finish(:mempool_mem_reserve_gc, _gcid, nothing)
+    end
 end
 
 function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
@@ -459,6 +477,10 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
                  tag=nothing, leaf_tag=Tag(),
                  destructor=nothing)
     if pid == myid()
+        _logging = logging_enabled()
+        _psid = _logging ? (;size, u=next_log_id()) : nothing
+        _logging && mp_timespan_start(:mempool_poolset, _psid, nothing)
+        try
         if !restore
             @lock MEM_RESERVE_LOCK ensure_memory_reserved(size)
         end
@@ -506,6 +528,9 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
             retain_on_device!(device, state, id, true; all=true)
         end
         return d
+        finally
+            _logging && mp_timespan_finish(:mempool_poolset, _psid, nothing)
+        end
     else
         # use our serialization
         remotecall_fetch(pid, MMWrap(x)) do wx
@@ -527,6 +552,15 @@ end
 
 function poolget(ref::DRef)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "?? (", ref.owner, ", ", ref.id, ") at ", myid(), "\n")
+    if logging_enabled()
+        gid = (;ref=ref.id, owner=ref.owner, u=next_log_id())
+        mp_timespan_start(:mempool_poolget, gid, nothing)
+        try
+            return access_ref(identity, ref)
+        finally
+            mp_timespan_finish(:mempool_poolget, gid, nothing)
+        end
+    end
     return access_ref(identity, ref)
 end
 function access_ref(f, ref::DRef, args...; local_only::Bool=false)
