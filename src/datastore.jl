@@ -578,6 +578,13 @@ function _getlocal(f, id, remote, args...; local_only::Bool, from::Int)
     end
 end
 
+"Deferred device-deletion work item drained by the shared `SEND_QUEUE` task."
+function _delete_device_work(state::RefState, id::Int)
+    device = storage_read(state).root
+    device !== nothing && delete_from_device!(device, state, id)
+    return
+end
+
 function datastore_delete(id)
     @safe_lock_spin datastore_counters_lock begin
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-- (", myid(), ", ", id, ") with ", string(datastore_counters[(myid(), id)]), "\n"; gc_context=true)
@@ -589,12 +596,13 @@ function datastore_delete(id)
         haskey(datastore, id) ? datastore[id] : nothing
     end
     (state === nothing) && return
-    errormonitor(Threads.@spawn begin
-        device = storage_read(state).root
-        if device !== nothing
-            delete_from_device!(device, state, id)
-        end
-    end)
+    # Defer device deletion onto the shared serial work queue rather than
+    # spawning a fresh task per teardown. datastore_delete frequently runs from
+    # a GC/finalizer context where task switches are illegal, so the device read
+    # and `delete_from_device!` (which may wait on an in-flight storage
+    # transition) must not run inline here. `_enqueue_work` is finalizer-safe and
+    # reuses one long-lived task, avoiding a Task allocation per ref teardown.
+    _enqueue_work(_delete_device_work, state, id; gc_context=true)
     @safe_lock_spin datastore_lock begin
         haskey(datastore, id) && delete!(datastore, id)
     end
