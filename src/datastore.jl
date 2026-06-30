@@ -463,9 +463,13 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
 
         id = atomic_add!(id_counter, 1)
         sstate = if !restore
+            # Data is already in memory, so this state is born ready: share the
+            # set `ALWAYS_READY` Event and the empty `NO_LEAVES` vector instead
+            # of allocating fresh ones.
             StorageState(Some{Any}(x),
-                         Vector{StorageLeaf}(),
-                         device)
+                         NO_LEAVES,
+                         device,
+                         ALWAYS_READY)
         else
             @assert !isa(leaf_device, CPURAMDevice) "Cannot use `CPURAMDevice()` as leaf device when `restore=true`"
             StorageState(nothing,
@@ -562,7 +566,7 @@ end
 
 function _getlocal(f, id, remote, args...; local_only::Bool, from::Int)
     state = with_lock(()->datastore[id], datastore_lock)
-    lock_read(state.lock) do
+    lock_read(getlock!(state)) do
         if state.redirect !== nothing
             return RedirectTo(state.redirect)
         end
@@ -621,7 +625,7 @@ function migrate!(ref::DRef, to::Integer; pre_migration=nothing, dest_post_migra
     # Lock the ref against further accesses
     # FIXME: Below is racey w.r.t data mutation
     local new_ref
-    @lock state.lock begin
+    @lock getlock!(state) begin
         # Read the current value of the ref
         data = read_from_device(state, ref, true)
 
