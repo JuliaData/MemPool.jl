@@ -2,7 +2,7 @@ name = "MemPool"
 uuid = "f9f48841-c794-520a-933b-121f7ba6ed94"
 license = "MIT"
 desc = "a simple distributed data store"
-version = "0.4.15"
+version = "0.4.16"
 
 [deps]
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
