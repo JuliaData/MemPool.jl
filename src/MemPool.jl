@@ -137,6 +137,10 @@ end
 function __init__()
     SESSION[] = "sess-" * randstring(6)
 
+    # Ensure the shared born-ready Event is set at runtime, independent of how
+    # precompilation serialized it.
+    notify(ALWAYS_READY)
+
     DISKCACHE_CONFIG[] = diskcache_config = DiskCacheConfig()
     setup_global_device!(diskcache_config)
 

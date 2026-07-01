@@ -304,6 +304,17 @@ end
 Base.notify(sstate::StorageState) = notify(sstate.ready)
 Base.wait(sstate::StorageState) = wait(sstate.ready)
 
+# Shared sentinels to avoid per-ref allocation on the common `poolset` path.
+# `ALWAYS_READY`: a permanently-set Event — refs whose data is in memory at
+# creation never need readers to block on `.ready`, so they can share one set
+# Event instead of allocating a fresh one. It is (re)notified in `__init__` so
+# it is set regardless of how precompilation serializes it.
+# `NO_LEAVES`: an empty leaves vector — `leaves` are only ever replaced via
+# copy-on-write (`vcat`/`filter`/`copy_leaves`), never mutated in place, so a
+# single shared empty vector is safe for any ref that has not been spilled.
+const ALWAYS_READY = Base.Event()
+const NO_LEAVES = StorageLeaf[]
+
 mutable struct RefState
     # The storage state associated with the reference and its values
     @atomic storage::StorageState
@@ -314,8 +325,11 @@ mutable struct RefState
     leaf_tag::Tag
     # Destructor, if any
     destructor::Any
-    # A Reader-Writer lock to protect access to this struct
-    lock::ReadWriteLock
+    # A Reader-Writer lock to protect access to this struct, created lazily on
+    # first use (see `getlock!`): most refs are never read-locked or migrated,
+    # so allocating the lock (a ReentrantLock + two Conditions) eagerly is pure
+    # overhead on the ref-creation hot path.
+    @atomic lock::Union{ReadWriteLock,Nothing}
     # The DRef that this value may be redirecting to
     redirect::Union{DRef,Nothing}
 end
@@ -325,7 +339,24 @@ RefState(storage::StorageState, size::Integer;
     RefState(storage, size,
              tag, leaf_tag,
              destructor,
-             ReadWriteLock(), nothing)
+             nothing, nothing)
+
+"""
+    getlock!(state::RefState) -> ReadWriteLock
+
+Returns the reader-writer lock guarding `state`, creating and atomically
+installing it on first use. The lock is allocated lazily because most refs
+(small in-memory values, task handles, etc.) are never read-locked via
+`_getlocal`/`poolget` nor migrated, so eager allocation just wastes time and
+memory during ref creation.
+"""
+function getlock!(state::RefState)
+    lk = @atomic :acquire state.lock
+    lk !== nothing && return lk
+    newlk = ReadWriteLock()
+    repl = @atomicreplace :acquire_release :acquire state.lock nothing => newlk
+    return repl.success ? newlk : (repl.old::ReadWriteLock)
+end
 function Base.getproperty(state::RefState, field::Symbol)
     if field === :storage
         throw(ArgumentError("Cannot directly read `:storage` field of `RefState`\nUse `storage_read(state)` instead"))

@@ -463,9 +463,13 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
 
         id = atomic_add!(id_counter, 1)
         sstate = if !restore
+            # Data is already in memory, so this state is born ready: share the
+            # set `ALWAYS_READY` Event and the empty `NO_LEAVES` vector instead
+            # of allocating fresh ones.
             StorageState(Some{Any}(x),
-                         Vector{StorageLeaf}(),
-                         device)
+                         NO_LEAVES,
+                         device,
+                         ALWAYS_READY)
         else
             @assert !isa(leaf_device, CPURAMDevice) "Cannot use `CPURAMDevice()` as leaf device when `restore=true`"
             StorageState(nothing,
@@ -562,7 +566,7 @@ end
 
 function _getlocal(f, id, remote, args...; local_only::Bool, from::Int)
     state = with_lock(()->datastore[id], datastore_lock)
-    lock_read(state.lock) do
+    lock_read(getlock!(state)) do
         if state.redirect !== nothing
             return RedirectTo(state.redirect)
         end
@@ -572,6 +576,13 @@ function _getlocal(f, id, remote, args...; local_only::Bool, from::Int)
         value = read_from_device(state, id, true)
         return Some{Any}(f(value, args...))
     end
+end
+
+"Deferred device-deletion work item drained by the shared `SEND_QUEUE` task."
+function _delete_device_work(state::RefState, id::Int)
+    device = storage_read(state).root
+    device !== nothing && delete_from_device!(device, state, id)
+    return
 end
 
 function datastore_delete(id)
@@ -585,12 +596,13 @@ function datastore_delete(id)
         haskey(datastore, id) ? datastore[id] : nothing
     end
     (state === nothing) && return
-    errormonitor(Threads.@spawn begin
-        device = storage_read(state).root
-        if device !== nothing
-            delete_from_device!(device, state, id)
-        end
-    end)
+    # Defer device deletion onto the shared serial work queue rather than
+    # spawning a fresh task per teardown. datastore_delete frequently runs from
+    # a GC/finalizer context where task switches are illegal, so the device read
+    # and `delete_from_device!` (which may wait on an in-flight storage
+    # transition) must not run inline here. `_enqueue_work` is finalizer-safe and
+    # reuses one long-lived task, avoiding a Task allocation per ref teardown.
+    _enqueue_work(_delete_device_work, state, id; gc_context=true)
     @safe_lock_spin datastore_lock begin
         haskey(datastore, id) && delete!(datastore, id)
     end
@@ -621,7 +633,7 @@ function migrate!(ref::DRef, to::Integer; pre_migration=nothing, dest_post_migra
     # Lock the ref against further accesses
     # FIXME: Below is racey w.r.t data mutation
     local new_ref
-    @lock state.lock begin
+    @lock getlock!(state) begin
         # Read the current value of the ref
         data = read_from_device(state, ref, true)
 
