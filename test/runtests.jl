@@ -275,6 +275,154 @@ end
     =#
 end
 
+@testset "DEvent" begin
+    @testset "Same-process" begin
+        e = MemPool.DEvent()
+        @test MemPool.owner(e) == myid()
+        @test !MemPool.isset(e)
+
+        notify(e)
+        @test MemPool.isset(e)
+        # wait returns immediately once set, and notify is idempotent
+        wait(e)
+        notify(e)
+        @test MemPool.isset(e)
+
+        # Concurrent multithreaded waiters are all released by a single notify
+        e2 = MemPool.DEvent()
+        ntasks = 8
+        released = zeros(Bool, ntasks)
+        waiters = [Threads.@spawn begin
+            wait(e2)
+            released[i] = MemPool.isset(e2)
+        end for i in 1:ntasks]
+        sleep(0.2)
+        @test !any(released)
+        notify(e2)
+        foreach(wait, waiters)
+        @test all(released)
+
+        # Serializes/deserializes (roundtrips locally) without error
+        io = IOBuffer()
+        serialize(io, e)
+        e3 = deserialize(seekstart(io))
+        @test e3 isa MemPool.DEvent
+        @test MemPool.isset(e3)
+    end
+
+    @testset "Cross-process" begin
+        # Created on worker 2, checked/notified from worker 1 (us)
+        e1 = MemPool.DEvent(2)
+        @test MemPool.owner(e1) == 2
+        @test !MemPool.isset(e1)
+        @test fetch(@spawnat 2 !MemPool.isset(e1))
+
+        notify(e1)
+        @test MemPool.isset(e1)
+        wait(e1)
+        @test fetch(@spawnat 2 MemPool.isset(e1))
+
+        # Created locally, notified from a remote worker
+        e2 = MemPool.DEvent()
+        @test MemPool.owner(e2) == myid()
+        @test !MemPool.isset(e2)
+        fetch(@spawnat 2 notify(e2))
+        @test MemPool.isset(e2)
+
+        # Created on worker 2, notified from worker 3, observed from us
+        e3 = MemPool.DEvent(2)
+        fetch(@spawnat 3 notify(e3))
+        @test MemPool.isset(e3)
+        @test fetch(@spawnat 3 MemPool.isset(e3))
+
+        # wait() from a remote worker blocks until notified from another remote worker
+        e4 = MemPool.DEvent(2)
+        waiter = @spawnat 3 wait(e4)
+        sleep(0.2)
+        @test !isready(waiter)
+        fetch(@spawnat 2 notify(e4))
+        fetch(waiter)
+        @test MemPool.isset(e4)
+    end
+end
+
+@testset "DFuture" begin
+    @testset "Same-process" begin
+        f = MemPool.DFuture()
+        @test MemPool.owner(f.event) == myid()
+        @test !isready(f)
+
+        put!(f, "hello")
+        @test isready(f)
+        @test fetch(f) == "hello"
+
+        # write-once: a second put! is ignored leniently
+        put!(f, "world")
+        @test fetch(f) == "hello"
+
+        # wait() blocks until put!, and is released by it
+        f2 = MemPool.DFuture()
+        waiter = Threads.@spawn wait(f2)
+        sleep(0.2)
+        @test !istaskdone(waiter)
+        put!(f2, 1)
+        wait(waiter)
+        @test istaskdone(waiter)
+
+        # cache is populated after the first fetch
+        f3 = MemPool.DFuture()
+        put!(f3, [1, 2, 3])
+        @test (@atomic f3.cache) === nothing
+        @test fetch(f3) == [1, 2, 3]
+        @test something(@atomic f3.cache) == [1, 2, 3]
+    end
+
+    @testset "Cross-process" begin
+        # Created on worker 2, put!/fetch'd from us
+        f1 = MemPool.DFuture(2)
+        @test MemPool.owner(f1.event) == 2
+        @test !isready(f1)
+        @test fetch(@spawnat 2 !isready(f1))
+
+        put!(f1, [1, 2, 3])
+        @test isready(f1)
+        @test fetch(f1) == [1, 2, 3]
+        @test fetch(@spawnat 2 fetch(f1)) == [1, 2, 3]
+
+        # Created locally, put! from a remote worker
+        f2 = MemPool.DFuture()
+        fetch(@spawnat 2 put!(f2, :remote))
+        @test fetch(f2) == :remote
+
+        # Created on worker 2, put! from worker 3, fetch'd from us and worker 3
+        f3 = MemPool.DFuture(2)
+        fetch(@spawnat 3 put!(f3, "abc"))
+        @test fetch(f3) == "abc"
+        @test fetch(@spawnat 3 fetch(f3)) == "abc"
+
+        # The cached value is not re-serialized: sending an already-fetched
+        # DFuture to another process resets its cache (verified via a
+        # roundtrip through the same serializer used for RPC), so the
+        # destination must (transparently) re-fetch from the owner rather
+        # than receive our locally-cached copy
+        f4 = MemPool.DFuture()
+        put!(f4, "cached-locally")
+        @test fetch(f4) == "cached-locally" # populates our local cache
+        io = IOBuffer()
+        serialize(io, f4)
+        f4_copy = deserialize(seekstart(io))
+        @test (@atomic f4_copy.cache) === nothing # cache was dropped
+        @test something(@atomic f4.cache) == "cached-locally" # original is untouched
+        @test fetch(f4_copy) == "cached-locally" # transparently re-fetched from the owner
+
+        # And this also holds when actually crossing process boundaries
+        f5 = MemPool.DFuture()
+        put!(f5, "cached-locally-too")
+        @test fetch(f5) == "cached-locally-too"
+        @test fetch(@spawnat 2 fetch(f5)) == "cached-locally-too"
+    end
+end
+
 @testset "StorageState" begin
     sstate1 = MemPool.StorageState(nothing,
                                    MemPool.StorageLeaf[],

@@ -4,6 +4,7 @@ import Preferences: @load_preference, @set_preferences!
 using Serialization, Sockets, Random
 import Serialization: serialize, deserialize
 export DRef, FileRef, poolset, poolget, mmwrite, mmread, cleanup
+export DEvent, DFuture
 import .Threads: ReentrantLock
 using ScopedValues
 
@@ -72,6 +73,7 @@ include("read_write_lock.jl")
 include("stack.jl")
 include("clock.jl")
 include("datastore.jl")
+include("devent.jl")
 
 """
     approx_size(d)
