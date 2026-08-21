@@ -484,11 +484,24 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
     end
 end
 
-function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
-                 retain=false, restore=false,
-                 device=GLOBAL_DEVICE[], leaf_device=initial_leaf_device(device),
-                 tag=nothing, leaf_tag=Tag(),
-                 destructor=nothing)
+poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
+        retain=false, restore=false,
+        device=GLOBAL_DEVICE[], leaf_device=initial_leaf_device(device),
+        tag=nothing, leaf_tag=Tag(),
+        destructor=nothing) =
+    poolset_positional(x, pid, size, retain, restore, device, leaf_device, tag, leaf_tag, destructor)
+
+"""
+    poolset_positional(x, pid, size, retain, restore, device, leaf_device, tag, leaf_tag, destructor)
+
+Fully positional core of [`poolset`](@ref), for hot paths that would
+otherwise rebuild keyword NamedTuples at every relay layer.
+"""
+function poolset_positional(@nospecialize(x), pid, size,
+                            retain, restore,
+                            device, leaf_device,
+                            tag, leaf_tag,
+                            destructor)
     if pid == myid()
         if !restore && MEM_RESERVED[] != 0
             @lock MEM_RESERVE_LOCK ensure_memory_reserved(size)
