@@ -180,6 +180,11 @@ const datastore_counters = Dict{DRefID, RefCounters}()
 # Flag set when this session is exiting
 const exit_flag = Ref{Bool}(false)
 
+# Shared empty transfer table, used when a ref was never sent anywhere (the
+# common case). `transfers` is only ever read by `poolunref_owner` (and
+# serialized when sent to a remote owner), never mutated, so sharing is safe.
+const EMPTY_TRANSFERS = Dict{Int,Int}()
+
 """
 Updates `local_counter` by `adj`, and checks if the ref is no longer
 present on this worker. If so, all sent references are collected and sent to
@@ -187,11 +192,13 @@ the owner.
 """
 function update_and_check_local!(ctrs, owner, id, adj)
     if atomic_add!(ctrs.local_counter, adj) == 0 - adj
-        transfers = nothing
+        transfers = EMPTY_TRANSFERS
         @safe_lock_spin ctrs.tx_lock begin
             DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "LL (", owner, ", ", id, ") at ", myid(), " with ", string(ctrs), "\n"; gc_context=true)
-            transfers = copy(ctrs.send_counters)
-            empty!(ctrs.send_counters)
+            if !isempty(ctrs.send_counters)
+                transfers = copy(ctrs.send_counters)
+                empty!(ctrs.send_counters)
+            end
         end
         if myid() == owner
             # N.B. Immediately update counters to prevent hidden counts in send queue
