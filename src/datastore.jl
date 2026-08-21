@@ -501,19 +501,25 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
                          [StorageLeaf(leaf_device, Some{Any}(x), retain)],
                          device)
         end
-        notify(sstate)
+        # `ALWAYS_READY` is permanently set (see `__init__`), so notifying it is
+        # a no-op that would only take its `Condition`'s lock
+        sstate.ready === ALWAYS_READY || notify(sstate)
+        # N.B. Calls the positional (default) constructor directly, to avoid
+        # building a heap-allocated NamedTuple for the keyword constructor
         state = RefState(sstate,
-                         size;
+                         size,
                          tag,
                          leaf_tag,
-                         destructor)
+                         destructor,
+                         nothing,
+                         nothing)
         rc = RefCounters()
         Threads.atomic_add!(rc.local_counter, 1)
         Threads.atomic_add!(rc.worker_counter, 1)
-        with_lock(datastore_counters_lock) do
+        @safe_lock datastore_counters_lock begin
             datastore_counters[(pid, id)] = rc
         end
-        with_lock(datastore_lock) do
+        @safe_lock datastore_lock begin
             datastore[id] = state
         end
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "++ (", myid(), ", ", id, ") [", x, "]\n")
