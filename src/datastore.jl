@@ -609,8 +609,8 @@ function access_ref(f, ref::DRef, args...; local_only::Bool=false)
 end
 
 function _getlocal(f, id, remote, args...; local_only::Bool, from::Int)
-    state = with_lock(()->datastore[id], datastore_lock)
-    lock_read(getlock!(state)) do
+    state = @safe_lock datastore_lock datastore[id]
+    @lock_read getlock!(state) begin
         if state.redirect !== nothing
             return RedirectTo(state.redirect)
         end
