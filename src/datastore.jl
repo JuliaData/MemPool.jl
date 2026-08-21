@@ -334,7 +334,6 @@ function poolunref(d::DRef)
 end
 "Called on owner when a worker no longer holds any references to DRef with ID `id`."
 function poolunref_owner(id::Int, transfers::Dict{Int,Int}; gc_context=false)
-    xfers = sum(map(sum, values(transfers)))
     ctrs = if gc_context
         @safe_lock_spin datastore_counters_lock begin
             @assert haskey(datastore_counters, (myid(),id)) "poolunref_owner called before any poolref_owner: ($(myid()), $id)"
