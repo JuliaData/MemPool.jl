@@ -135,17 +135,18 @@ struct RefCounters
     tx_lock::NonReentrantLock
 end
 function RefCounters()
-    rc = maybepop!(REFCOUNTERS_CACHE)
+    # N.B. `trypop!` (rather than `maybepop!`) avoids allocating a `Some` on
+    # every ref creation; `RefCounters` can never be `nothing`, so the
+    # `nothing`-as-empty sentinel is unambiguous here.
+    rc = trypop!(REFCOUNTERS_CACHE)
     if rc === nothing
-        rc = RefCounters(Atomic{Int}(0),
-                            Atomic{Int}(0),
-                            Dict{Int,Int}(),
-                            Dict{Int,Int}(),
-                            NonReentrantLock())
-    else
-        Threads.atomic_sub!(REFCOUNTERS_STORED, 1)
-        rc = something(rc)
+        return RefCounters(Atomic{Int}(0),
+                           Atomic{Int}(0),
+                           Dict{Int,Int}(),
+                           Dict{Int,Int}(),
+                           NonReentrantLock())
     end
+    Threads.atomic_sub!(REFCOUNTERS_STORED, 1)
     return rc
 end
 function refcounters_replace!(rc)
