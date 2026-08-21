@@ -589,6 +589,59 @@ function _delete_device_work(state::RefState, id::Int)
     return
 end
 
+# `Base.Event`'s `set` field is declared `@atomic` on modern Julia versions, and
+# plain on older ones; probe once (at precompile time) for how it can be read.
+# If neither accessor works, we simply report "not set", which just disables the
+# inline-deletion fast path below for non-`ALWAYS_READY` states.
+const EVENT_SET_ACCESS = let ev = Base.Event()
+    if (try; (@atomic :acquire ev.set); true; catch; false; end)
+        :atomic
+    elseif (try; getfield(ev, :set); true; catch; false; end)
+        :plain
+    else
+        :none
+    end
+end
+"Returns `true` if `ev` is already set (never blocks, and is finalizer-safe)."
+@static if EVENT_SET_ACCESS === :atomic
+    _event_isset(ev::Base.Event) = (@atomic :acquire ev.set)::Bool
+else
+    @static if EVENT_SET_ACCESS === :plain
+        _event_isset(ev::Base.Event) = getfield(ev, :set)::Bool
+    else
+        _event_isset(::Base.Event) = false
+    end
+end
+
+"""
+Attempts to delete a plain in-memory ref's data inline, without going through
+the `SEND_QUEUE`. Returns `true` if the deletion was performed.
+
+This is only valid when the ref's current `StorageState` is fully settled (its
+`ready` `Event` is already set, so no storage transition is in flight), it is
+rooted on a `CPURAMDevice`, and it has no leaves (nothing has been spilled to a
+leaf device). In that case, `delete_from_device!(::CPURAMDevice, ...)` reduces
+to swapping in a `StorageState` with `data === nothing`, which we can do
+directly here, without allocating a fresh `Event` or waking the queue task.
+"""
+function _try_inline_delete!(state::RefState)
+    # N.B. `getfield` bypasses `StorageState`'s blocking `getproperty`
+    sstate = @atomic :acquire state.storage
+    ready = getfield(sstate, :ready)
+    # `ALWAYS_READY` is permanently set (and is only ever installed by a fully
+    # settled state), so it needs no further check
+    (ready === ALWAYS_READY || _event_isset(ready)) || return false
+    root = getfield(sstate, :root)
+    root isa CPURAMDevice || return false
+    isempty(getfield(sstate, :leaves)) || return false
+    getfield(sstate, :data) === nothing && return true
+    # Data is in memory and settled; drop it. The refcount for this ref has
+    # already hit zero, so no other task can be transitioning this state.
+    @atomic :release state.storage = StorageState(nothing, NO_LEAVES, root,
+                                                  ALWAYS_READY)
+    return true
+end
+
 function datastore_delete(id)
     @safe_lock_spin datastore_counters_lock begin
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-- (", myid(), ", ", id, ") with ", string(datastore_counters[(myid(), id)]), "\n"; gc_context=true)
@@ -600,13 +653,18 @@ function datastore_delete(id)
         haskey(datastore, id) ? datastore[id] : nothing
     end
     (state === nothing) && return
-    # Defer device deletion onto the shared serial work queue rather than
-    # spawning a fresh task per teardown. datastore_delete frequently runs from
-    # a GC/finalizer context where task switches are illegal, so the device read
-    # and `delete_from_device!` (which may wait on an in-flight storage
+    # Fast path: a plain, settled, in-memory-only ref can be torn down inline,
+    # without waking the queue task at all (see `_try_inline_delete!`).
+    #
+    # Otherwise, defer device deletion onto the shared serial work queue rather
+    # than spawning a fresh task per teardown. datastore_delete frequently runs
+    # from a GC/finalizer context where task switches are illegal, so the device
+    # read and `delete_from_device!` (which may wait on an in-flight storage
     # transition) must not run inline here. `_enqueue_work` is finalizer-safe and
     # reuses one long-lived task, avoiding a Task allocation per ref teardown.
-    _enqueue_work(_delete_device_work, state, id; gc_context=true)
+    if !_try_inline_delete!(state)
+        _enqueue_work(_delete_device_work, state, id; gc_context=true)
+    end
     @safe_lock_spin datastore_lock begin
         haskey(datastore, id) && delete!(datastore, id)
     end
