@@ -29,9 +29,34 @@
 mutable struct DEventBox
     @atomic set::Bool
     @atomic value::Union{Some{Any},Nothing}
-    const event::Base.Event # autoreset=false: stays signalled once notified
+    # Lazily created on first blocking wait: a Base.Event costs ~5 allocations
+    # (Event + condition + lock chain) and most boxes are set before anyone
+    # ever needs to block on them
+    @atomic event::Union{Base.Event,Nothing}
 end
-DEventBox() = DEventBox(false, nothing, Base.Event())
+DEventBox() = DEventBox(false, nothing, nothing)
+
+# Set-before-read pairing with `_devent_box_wait`: the notifier sets `set`
+# first, then notifies any installed event; a waiter installs its event, then
+# re-checks `set` before blocking, so a racing notify is never missed.
+function _devent_box_notify(box::DEventBox)
+    @atomic box.set = true
+    event = @atomic box.event
+    event !== nothing && notify(event)
+    return
+end
+function _devent_box_wait(box::DEventBox)
+    (@atomic box.set) && return
+    event = @atomic box.event
+    if event === nothing
+        new_event = Base.Event()
+        _, installed = @atomicreplace box.event nothing => new_event
+        event = installed ? new_event : (@atomic box.event)::Base.Event
+    end
+    (@atomic box.set) && return
+    wait(event)
+    return
+end
 
 # Owner-side registry: backing-`DRef` id => box. Accessed under a
 # `NonReentrantLock` via spin-locking so it is safe to touch from the `DRef`
@@ -88,8 +113,7 @@ owner(de::DEvent) = de.ref.owner
 function _devent_notify_local(id::Int)
     box = _devent_box(id)
     box === nothing && return
-    @atomic box.set = true
-    notify(box.event)
+    _devent_box_notify(box)
     return
 end
 function Base.notify(de::DEvent)
@@ -105,7 +129,7 @@ end
 function _devent_wait_local(id::Int)
     box = _devent_box(id)
     box === nothing && return # already cleaned up => must have fired
-    wait(box.event)
+    _devent_box_wait(box)
     return
 end
 function Base.wait(de::DEvent)
@@ -170,8 +194,7 @@ function _devent_put_local(id::Int, @nospecialize(v))
     box === nothing && return
     _, ok = @atomicreplace box.value nothing => Some{Any}(v)
     ok || return # write-once: ignore double-puts leniently
-    @atomic box.set = true
-    notify(box.event)
+    _devent_box_notify(box)
     return
 end
 function Base.put!(f::DFuture, @nospecialize(v))
@@ -188,7 +211,7 @@ end
 function _devent_fetch_local(id::Int)
     box = _devent_box(id)
     box === nothing && error("DFuture value is unavailable (already cleaned up)")
-    wait(box.event)
+    _devent_box_wait(box)
     return something(@atomic box.value)
 end
 function Base.fetch(f::DFuture)
