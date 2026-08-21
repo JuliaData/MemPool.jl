@@ -269,6 +269,13 @@ function _enqueue_work(f, args...; gc_context=false)
                     work, _args = take!(SEND_QUEUE.queue)
                     SEND_QUEUE.processing = true
                     work(_args...)
+                    # Drain any further already-queued items before parking
+                    # again, to amortize the cost of task wake-ups when many
+                    # refs are torn down at once.
+                    while isready(SEND_QUEUE.queue)
+                        work, _args = take!(SEND_QUEUE.queue)
+                        work(_args...)
+                    end
                     SEND_QUEUE.processing = false
                 catch err
                     exit_flag[] && continue
