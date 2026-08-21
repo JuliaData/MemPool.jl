@@ -305,10 +305,8 @@ end
 
 function poolref(d::DRef, recv=false)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "^^ (", d.owner, ", ", d.id, ") at ", myid(), "\n")
-    ctrs = with_lock(datastore_counters_lock) do
-        # This might be a new DRef
-        get!(RefCounters, datastore_counters, (d.owner, d.id))
-    end
+    # This might be a new DRef
+    ctrs = @safe_lock datastore_counters_lock get!(RefCounters, datastore_counters, (d.owner, d.id))
     # Update the local refcount
     if atomic_add!(ctrs.local_counter, 1) == 0
         # We've never seen this DRef, so tell the owner
@@ -332,8 +330,7 @@ end
 function poolref_owner(id::Int, ctrs=nothing)
     free = false
     if ctrs === nothing
-        ctrs = with_lock(()->datastore_counters[(myid(), id)],
-                         datastore_counters_lock)
+        ctrs = @safe_lock datastore_counters_lock datastore_counters[(myid(), id)]
     end
     update_and_check_owner!(ctrs, id, 1)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "== (", myid(), ", ", id, ")\n")
@@ -355,42 +352,45 @@ function poolunref_owner(id::Int, transfers::Dict{Int,Int}; gc_context=false)
             datastore_counters[(myid(), id)]
         end
     else
-        with_lock(datastore_counters_lock) do
+        @safe_lock datastore_counters_lock begin
             @assert haskey(datastore_counters, (myid(),id)) "poolunref_owner called before any poolref_owner: ($(myid()), $id)"
             datastore_counters[(myid(), id)]
         end
     end
-    if gc_context
-        @safe_lock_spin ctrs.tx_lock begin
-            for pid in keys(transfers)
-                old = get(ctrs.recv_counters, pid, 0)
-                ctrs.recv_counters[pid] = old + transfers[pid]
+    if !isempty(transfers)
+        if gc_context
+            @safe_lock_spin ctrs.tx_lock begin
+                for pid in keys(transfers)
+                    old = get(ctrs.recv_counters, pid, 0)
+                    ctrs.recv_counters[pid] = old + transfers[pid]
+                end
             end
-        end
-    else
-        with_lock(ctrs.tx_lock) do
-            for pid in keys(transfers)
-                old = get(ctrs.recv_counters, pid, 0)
-                ctrs.recv_counters[pid] = old + transfers[pid]
+        else
+            @safe_lock ctrs.tx_lock begin
+                for pid in keys(transfers)
+                    old = get(ctrs.recv_counters, pid, 0)
+                    ctrs.recv_counters[pid] = old + transfers[pid]
+                end
             end
         end
     end
-    DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "@@ (", myid(), ", ", id, ") with xfers ", xfers, " and ", string(ctrs), "\n"; gc_context)
-    update_and_check_owner!(ctrs, id, -1)
+    if DEBUG_REFCOUNTING[]
+        xfers = sum(values(transfers); init=0)
+        _enqueue_work(Core.print, "@@ (", myid(), ", ", id, ") with xfers ", xfers, " and ", string(ctrs), "\n"; gc_context)
+    end
+    update_and_check_owner!(ctrs, id, -1, gc_context)
 end
 function pooltransfer_send_local(d::DRef, to_pid::Int)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-> (", d.owner, ", ", d.id, ") to ", to_pid, "\n")
-    ctrs = with_lock(()->datastore_counters[(d.owner, d.id)],
-                     datastore_counters_lock)
-    with_lock(ctrs.tx_lock) do
+    ctrs = @safe_lock datastore_counters_lock datastore_counters[(d.owner, d.id)]
+    @safe_lock ctrs.tx_lock begin
         prev = get(ctrs.send_counters, to_pid, 0)
         ctrs.send_counters[to_pid] = prev + 1
     end
 end
 function pooltransfer_recv_owner(id::Int, to_pid::Int)
-    ctrs = with_lock(()->datastore_counters[(myid(), id)],
-                     datastore_counters_lock)
-    with_lock(ctrs.tx_lock) do
+    ctrs = @safe_lock datastore_counters_lock datastore_counters[(myid(), id)]
+    @safe_lock ctrs.tx_lock begin
         prev = get(ctrs.recv_counters, to_pid, 0)
         ctrs.recv_counters[to_pid] = prev - 1
     end

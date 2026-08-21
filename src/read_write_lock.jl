@@ -153,3 +153,23 @@ function lock_read(f, lock)
         unlock_read(lock)
     end
 end
+
+"""
+    @lock_read lock ex
+
+Non-closure equivalent of `lock_read(f, lock)`: takes the read lock, evaluates
+`ex` inline (so no closure is allocated and no variables are boxed), and
+releases the read lock. A `return` inside `ex` returns from the enclosing
+function, with the lock still released by the `finally` block.
+"""
+macro lock_read(l, ex)
+    quote
+        temp = $(esc(l))
+        lock_read(temp)
+        try
+            $(esc(ex))
+        finally
+            unlock_read(temp)
+        end
+    end
+end
