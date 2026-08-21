@@ -399,6 +399,10 @@ satisfied, or `max_sweeps` number of cycles have elapsed.
 function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE_SWEEPS[])
     sat_sub(x::T, y::T) where T = x < y ? zero(T) : x-y
 
+    # No reservation requested, so there's nothing to ensure (and no reason to
+    # query the OS for memory availability)
+    MEM_RESERVED[] == 0 && return
+
     max_sweeps == 0 && return
 
     # Do a quick (cached) check, to optimize for many calls to this function when memory isn't tight
@@ -457,7 +461,7 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
                  tag=nothing, leaf_tag=Tag(),
                  destructor=nothing)
     if pid == myid()
-        if !restore
+        if !restore && MEM_RESERVED[] != 0
             @lock MEM_RESERVE_LOCK ensure_memory_reserved(size)
         end
 
