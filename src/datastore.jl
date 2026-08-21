@@ -566,8 +566,10 @@ function access_ref(f, ref::DRef, args...; local_only::Bool=false)
     original_ref = ref
 
     # Check global redirect cache
-    ref = lock_read(REDIRECT_CACHE_LOCK) do
-        get(REDIRECT_CACHE, ref, ref)
+    # N.B. Redirects are rare (they only occur after a `migrate!`), so skip the
+    # lock and lookup entirely until at least one redirect has been recorded
+    if REDIRECT_COUNT[] > 0
+        ref = @lock_read REDIRECT_CACHE_LOCK get(REDIRECT_CACHE, ref, ref)
     end
 
     # Fetch the value (or a RedirectTo) from the owner
@@ -588,6 +590,9 @@ function access_ref(f, ref::DRef, args...; local_only::Bool=false)
             REDIRECT_CACHE[ref] = value.ref
             REDIRECT_CACHE[original_ref] = value.ref
         end
+        # N.B. Monotonic: entries are only ever added (or dropped by the
+        # `WeakKeyDict`), and this only gates a redundant cache lookup
+        Threads.atomic_add!(REDIRECT_COUNT, 1)
         ref = value.ref
         @goto fetch
     end
@@ -763,6 +768,10 @@ end
 
 const REDIRECT_CACHE = WeakKeyDict{DRef,DRef}()
 const REDIRECT_CACHE_LOCK = ReadWriteLock()
+# Number of entries ever added to `REDIRECT_CACHE`. Monotonically increasing
+# (entries are never subtracted), and used only to skip the `REDIRECT_CACHE`
+# lookup on the `poolget` hot path when no redirect has ever been recorded.
+const REDIRECT_COUNT = Threads.Atomic{Int}(0)
 
 ## Default data directory
 
