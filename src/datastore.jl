@@ -217,26 +217,41 @@ end
 Updates `worker_counter` by `adj`, and checks if the ref can be freed. If it
 can be freed, it is immediately deleted from the datastore.
 """
-function update_and_check_owner!(ctrs, id, adj)
-    with_lock(ctrs.tx_lock) do
-        tx_free = true
-        for pid in keys(ctrs.recv_counters)
-            if ctrs.recv_counters[pid] == 0
-                delete!(ctrs.recv_counters, pid)
-            else
-                tx_free = false
-                break
-            end
+function update_and_check_owner!(ctrs, id, adj, gc_context::Bool=false)
+    # N.B. Both branches evaluate the body inline (no closure is allocated). The
+    # `gc_context` branch spins rather than blocking, because this is reachable
+    # from a finalizer context (via `poolunref` -> `update_and_check_local!` ->
+    # `poolunref_owner`), where yielding is illegal.
+    if gc_context
+        @safe_lock_spin ctrs.tx_lock begin
+            return _update_and_check_owner_locked!(ctrs, id, adj)
         end
-        if atomic_add!(ctrs.worker_counter, adj) == 0 - adj
-            DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "OO (", myid(), ", ", id, ") with ", string(ctrs), "\n"; gc_context=true)
-            if tx_free
-                datastore_delete(id)
-                return true
-            end
-            return false
+    else
+        @safe_lock ctrs.tx_lock begin
+            return _update_and_check_owner_locked!(ctrs, id, adj)
         end
     end
+end
+"Body of `update_and_check_owner!`; must be called with `ctrs.tx_lock` held."
+function _update_and_check_owner_locked!(ctrs, id, adj)
+    tx_free = true
+    for pid in keys(ctrs.recv_counters)
+        if ctrs.recv_counters[pid] == 0
+            delete!(ctrs.recv_counters, pid)
+        else
+            tx_free = false
+            break
+        end
+    end
+    if atomic_add!(ctrs.worker_counter, adj) == 0 - adj
+        DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "OO (", myid(), ", ", id, ") with ", string(ctrs), "\n"; gc_context=true)
+        if tx_free
+            datastore_delete(id)
+            return true
+        end
+        return false
+    end
+    return nothing
 end
 
 # HACK: Force remote GC messages to be executed serially
