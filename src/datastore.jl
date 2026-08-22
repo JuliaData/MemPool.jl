@@ -581,6 +581,21 @@ end
 
 function poolget(ref::DRef)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "?? (", ref.owner, ", ", ref.id, ") at ", myid(), "\n")
+    # Fast path for the overwhelmingly common case: a locally-owned,
+    # unredirected, in-memory CPURAM ref. The RCU storage read needs no lock,
+    # and skipping `access_ref`/`_getlocal` avoids their kwargs NamedTuple,
+    # read-lock acquisition, closure, and Some wrapper per get. Every guard
+    # failure falls through to the general path.
+    if ref.owner == myid() && REDIRECT_COUNT[] == 0
+        state = @safe_lock_spin datastore_lock get(datastore, ref.id, nothing)
+        if state isa RefState && getfield(state, :redirect) === nothing
+            sstate = @atomic :acquire state.storage
+            if getfield(sstate, :root) isa CPURAMDevice
+                data = getfield(sstate, :data)
+                data isa Some{Any} && return something(data)
+            end
+        end
+    end
     return access_ref(identity, ref)
 end
 function access_ref(f, ref::DRef, args...; local_only::Bool=false)
