@@ -135,17 +135,18 @@ struct RefCounters
     tx_lock::NonReentrantLock
 end
 function RefCounters()
-    rc = maybepop!(REFCOUNTERS_CACHE)
+    # N.B. `trypop!` (rather than `maybepop!`) avoids allocating a `Some` on
+    # every ref creation; `RefCounters` can never be `nothing`, so the
+    # `nothing`-as-empty sentinel is unambiguous here.
+    rc = trypop!(REFCOUNTERS_CACHE)
     if rc === nothing
-        rc = RefCounters(Atomic{Int}(0),
-                            Atomic{Int}(0),
-                            Dict{Int,Int}(),
-                            Dict{Int,Int}(),
-                            NonReentrantLock())
-    else
-        Threads.atomic_sub!(REFCOUNTERS_STORED, 1)
-        rc = something(rc)
+        return RefCounters(Atomic{Int}(0),
+                           Atomic{Int}(0),
+                           Dict{Int,Int}(),
+                           Dict{Int,Int}(),
+                           NonReentrantLock())
     end
+    Threads.atomic_sub!(REFCOUNTERS_STORED, 1)
     return rc
 end
 function refcounters_replace!(rc)
@@ -180,6 +181,11 @@ const datastore_counters = Dict{DRefID, RefCounters}()
 # Flag set when this session is exiting
 const exit_flag = Ref{Bool}(false)
 
+# Shared empty transfer table, used when a ref was never sent anywhere (the
+# common case). `transfers` is only ever read by `poolunref_owner` (and
+# serialized when sent to a remote owner), never mutated, so sharing is safe.
+const EMPTY_TRANSFERS = Dict{Int,Int}()
+
 """
 Updates `local_counter` by `adj`, and checks if the ref is no longer
 present on this worker. If so, all sent references are collected and sent to
@@ -187,11 +193,13 @@ the owner.
 """
 function update_and_check_local!(ctrs, owner, id, adj)
     if atomic_add!(ctrs.local_counter, adj) == 0 - adj
-        transfers = nothing
+        transfers = EMPTY_TRANSFERS
         @safe_lock_spin ctrs.tx_lock begin
             DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "LL (", owner, ", ", id, ") at ", myid(), " with ", string(ctrs), "\n"; gc_context=true)
-            transfers = copy(ctrs.send_counters)
-            empty!(ctrs.send_counters)
+            if !isempty(ctrs.send_counters)
+                transfers = copy(ctrs.send_counters)
+                empty!(ctrs.send_counters)
+            end
         end
         if myid() == owner
             # N.B. Immediately update counters to prevent hidden counts in send queue
@@ -210,26 +218,41 @@ end
 Updates `worker_counter` by `adj`, and checks if the ref can be freed. If it
 can be freed, it is immediately deleted from the datastore.
 """
-function update_and_check_owner!(ctrs, id, adj)
-    with_lock(ctrs.tx_lock) do
-        tx_free = true
-        for pid in keys(ctrs.recv_counters)
-            if ctrs.recv_counters[pid] == 0
-                delete!(ctrs.recv_counters, pid)
-            else
-                tx_free = false
-                break
-            end
+function update_and_check_owner!(ctrs, id, adj, gc_context::Bool=false)
+    # N.B. Both branches evaluate the body inline (no closure is allocated). The
+    # `gc_context` branch spins rather than blocking, because this is reachable
+    # from a finalizer context (via `poolunref` -> `update_and_check_local!` ->
+    # `poolunref_owner`), where yielding is illegal.
+    if gc_context
+        @safe_lock_spin ctrs.tx_lock begin
+            return _update_and_check_owner_locked!(ctrs, id, adj)
         end
-        if atomic_add!(ctrs.worker_counter, adj) == 0 - adj
-            DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "OO (", myid(), ", ", id, ") with ", string(ctrs), "\n"; gc_context=true)
-            if tx_free
-                datastore_delete(id)
-                return true
-            end
-            return false
+    else
+        @safe_lock ctrs.tx_lock begin
+            return _update_and_check_owner_locked!(ctrs, id, adj)
         end
     end
+end
+"Body of `update_and_check_owner!`; must be called with `ctrs.tx_lock` held."
+function _update_and_check_owner_locked!(ctrs, id, adj)
+    tx_free = true
+    for pid in keys(ctrs.recv_counters)
+        if ctrs.recv_counters[pid] == 0
+            delete!(ctrs.recv_counters, pid)
+        else
+            tx_free = false
+            break
+        end
+    end
+    if atomic_add!(ctrs.worker_counter, adj) == 0 - adj
+        DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "OO (", myid(), ", ", id, ") with ", string(ctrs), "\n"; gc_context=true)
+        if tx_free
+            datastore_delete(id)
+            return true
+        end
+        return false
+    end
+    return nothing
 end
 
 # HACK: Force remote GC messages to be executed serially
@@ -247,6 +270,13 @@ function _enqueue_work(f, args...; gc_context=false)
                     work, _args = take!(SEND_QUEUE.queue)
                     SEND_QUEUE.processing = true
                     work(_args...)
+                    # Drain any further already-queued items before parking
+                    # again, to amortize the cost of task wake-ups when many
+                    # refs are torn down at once.
+                    while isready(SEND_QUEUE.queue)
+                        work, _args = take!(SEND_QUEUE.queue)
+                        work(_args...)
+                    end
                     SEND_QUEUE.processing = false
                 catch err
                     exit_flag[] && continue
@@ -283,10 +313,8 @@ end
 
 function poolref(d::DRef, recv=false)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "^^ (", d.owner, ", ", d.id, ") at ", myid(), "\n")
-    ctrs = with_lock(datastore_counters_lock) do
-        # This might be a new DRef
-        get!(RefCounters, datastore_counters, (d.owner, d.id))
-    end
+    # This might be a new DRef
+    ctrs = @safe_lock datastore_counters_lock get!(RefCounters, datastore_counters, (d.owner, d.id))
     # Update the local refcount
     if atomic_add!(ctrs.local_counter, 1) == 0
         # We've never seen this DRef, so tell the owner
@@ -310,8 +338,7 @@ end
 function poolref_owner(id::Int, ctrs=nothing)
     free = false
     if ctrs === nothing
-        ctrs = with_lock(()->datastore_counters[(myid(), id)],
-                         datastore_counters_lock)
+        ctrs = @safe_lock datastore_counters_lock datastore_counters[(myid(), id)]
     end
     update_and_check_owner!(ctrs, id, 1)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "== (", myid(), ", ", id, ")\n")
@@ -327,49 +354,51 @@ function poolunref(d::DRef)
 end
 "Called on owner when a worker no longer holds any references to DRef with ID `id`."
 function poolunref_owner(id::Int, transfers::Dict{Int,Int}; gc_context=false)
-    xfers = sum(map(sum, values(transfers)))
     ctrs = if gc_context
         @safe_lock_spin datastore_counters_lock begin
             @assert haskey(datastore_counters, (myid(),id)) "poolunref_owner called before any poolref_owner: ($(myid()), $id)"
             datastore_counters[(myid(), id)]
         end
     else
-        with_lock(datastore_counters_lock) do
+        @safe_lock datastore_counters_lock begin
             @assert haskey(datastore_counters, (myid(),id)) "poolunref_owner called before any poolref_owner: ($(myid()), $id)"
             datastore_counters[(myid(), id)]
         end
     end
-    if gc_context
-        @safe_lock_spin ctrs.tx_lock begin
-            for pid in keys(transfers)
-                old = get(ctrs.recv_counters, pid, 0)
-                ctrs.recv_counters[pid] = old + transfers[pid]
+    if !isempty(transfers)
+        if gc_context
+            @safe_lock_spin ctrs.tx_lock begin
+                for pid in keys(transfers)
+                    old = get(ctrs.recv_counters, pid, 0)
+                    ctrs.recv_counters[pid] = old + transfers[pid]
+                end
             end
-        end
-    else
-        with_lock(ctrs.tx_lock) do
-            for pid in keys(transfers)
-                old = get(ctrs.recv_counters, pid, 0)
-                ctrs.recv_counters[pid] = old + transfers[pid]
+        else
+            @safe_lock ctrs.tx_lock begin
+                for pid in keys(transfers)
+                    old = get(ctrs.recv_counters, pid, 0)
+                    ctrs.recv_counters[pid] = old + transfers[pid]
+                end
             end
         end
     end
-    DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "@@ (", myid(), ", ", id, ") with xfers ", xfers, " and ", string(ctrs), "\n"; gc_context)
-    update_and_check_owner!(ctrs, id, -1)
+    if DEBUG_REFCOUNTING[]
+        xfers = sum(values(transfers); init=0)
+        _enqueue_work(Core.print, "@@ (", myid(), ", ", id, ") with xfers ", xfers, " and ", string(ctrs), "\n"; gc_context)
+    end
+    update_and_check_owner!(ctrs, id, -1, gc_context)
 end
 function pooltransfer_send_local(d::DRef, to_pid::Int)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-> (", d.owner, ", ", d.id, ") to ", to_pid, "\n")
-    ctrs = with_lock(()->datastore_counters[(d.owner, d.id)],
-                     datastore_counters_lock)
-    with_lock(ctrs.tx_lock) do
+    ctrs = @safe_lock datastore_counters_lock datastore_counters[(d.owner, d.id)]
+    @safe_lock ctrs.tx_lock begin
         prev = get(ctrs.send_counters, to_pid, 0)
         ctrs.send_counters[to_pid] = prev + 1
     end
 end
 function pooltransfer_recv_owner(id::Int, to_pid::Int)
-    ctrs = with_lock(()->datastore_counters[(myid(), id)],
-                     datastore_counters_lock)
-    with_lock(ctrs.tx_lock) do
+    ctrs = @safe_lock datastore_counters_lock datastore_counters[(myid(), id)]
+    @safe_lock ctrs.tx_lock begin
         prev = get(ctrs.recv_counters, to_pid, 0)
         ctrs.recv_counters[to_pid] = prev - 1
     end
@@ -398,6 +427,10 @@ satisfied, or `max_sweeps` number of cycles have elapsed.
 """
 function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE_SWEEPS[])
     sat_sub(x::T, y::T) where T = x < y ? zero(T) : x-y
+
+    # No reservation requested, so there's nothing to ensure (and no reason to
+    # query the OS for memory availability)
+    MEM_RESERVED[] == 0 && return
 
     max_sweeps == 0 && return
 
@@ -451,13 +484,26 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
     end
 end
 
-function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
-                 retain=false, restore=false,
-                 device=GLOBAL_DEVICE[], leaf_device=initial_leaf_device(device),
-                 tag=nothing, leaf_tag=Tag(),
-                 destructor=nothing)
+poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
+        retain=false, restore=false,
+        device=GLOBAL_DEVICE[], leaf_device=initial_leaf_device(device),
+        tag=nothing, leaf_tag=Tag(),
+        destructor=nothing) =
+    poolset_positional(x, pid, size, retain, restore, device, leaf_device, tag, leaf_tag, destructor)
+
+"""
+    poolset_positional(x, pid, size, retain, restore, device, leaf_device, tag, leaf_tag, destructor)
+
+Fully positional core of [`poolset`](@ref), for hot paths that would
+otherwise rebuild keyword NamedTuples at every relay layer.
+"""
+function poolset_positional(@nospecialize(x), pid, size,
+                            retain, restore,
+                            device, leaf_device,
+                            tag, leaf_tag,
+                            destructor)
     if pid == myid()
-        if !restore
+        if !restore && MEM_RESERVED[] != 0
             @lock MEM_RESERVE_LOCK ensure_memory_reserved(size)
         end
 
@@ -476,19 +522,25 @@ function poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
                          [StorageLeaf(leaf_device, Some{Any}(x), retain)],
                          device)
         end
-        notify(sstate)
+        # `ALWAYS_READY` is permanently set (see `__init__`), so notifying it is
+        # a no-op that would only take its `Condition`'s lock
+        sstate.ready === ALWAYS_READY || notify(sstate)
+        # N.B. Calls the positional (default) constructor directly, to avoid
+        # building a heap-allocated NamedTuple for the keyword constructor
         state = RefState(sstate,
-                         size;
+                         size,
                          tag,
                          leaf_tag,
-                         destructor)
+                         destructor,
+                         nothing,
+                         nothing)
         rc = RefCounters()
         Threads.atomic_add!(rc.local_counter, 1)
         Threads.atomic_add!(rc.worker_counter, 1)
-        with_lock(datastore_counters_lock) do
+        @safe_lock datastore_counters_lock begin
             datastore_counters[(pid, id)] = rc
         end
-        with_lock(datastore_lock) do
+        @safe_lock datastore_lock begin
             datastore[id] = state
         end
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "++ (", myid(), ", ", id, ") [", x, "]\n")
@@ -529,14 +581,31 @@ end
 
 function poolget(ref::DRef)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "?? (", ref.owner, ", ", ref.id, ") at ", myid(), "\n")
+    # Fast path for the overwhelmingly common case: a locally-owned,
+    # unredirected, in-memory CPURAM ref. The RCU storage read needs no lock,
+    # and skipping `access_ref`/`_getlocal` avoids their kwargs NamedTuple,
+    # read-lock acquisition, closure, and Some wrapper per get. Every guard
+    # failure falls through to the general path.
+    if ref.owner == myid() && REDIRECT_COUNT[] == 0
+        state = @safe_lock_spin datastore_lock get(datastore, ref.id, nothing)
+        if state isa RefState && getfield(state, :redirect) === nothing
+            sstate = @atomic :acquire state.storage
+            if getfield(sstate, :root) isa CPURAMDevice
+                data = getfield(sstate, :data)
+                data isa Some{Any} && return something(data)
+            end
+        end
+    end
     return access_ref(identity, ref)
 end
 function access_ref(f, ref::DRef, args...; local_only::Bool=false)
     original_ref = ref
 
     # Check global redirect cache
-    ref = lock_read(REDIRECT_CACHE_LOCK) do
-        get(REDIRECT_CACHE, ref, ref)
+    # N.B. Redirects are rare (they only occur after a `migrate!`), so skip the
+    # lock and lookup entirely until at least one redirect has been recorded
+    if REDIRECT_COUNT[] > 0
+        ref = @lock_read REDIRECT_CACHE_LOCK get(REDIRECT_CACHE, ref, ref)
     end
 
     # Fetch the value (or a RedirectTo) from the owner
@@ -557,6 +626,9 @@ function access_ref(f, ref::DRef, args...; local_only::Bool=false)
             REDIRECT_CACHE[ref] = value.ref
             REDIRECT_CACHE[original_ref] = value.ref
         end
+        # N.B. Monotonic: entries are only ever added (or dropped by the
+        # `WeakKeyDict`), and this only gates a redundant cache lookup
+        Threads.atomic_add!(REDIRECT_COUNT, 1)
         ref = value.ref
         @goto fetch
     end
@@ -565,8 +637,8 @@ function access_ref(f, ref::DRef, args...; local_only::Bool=false)
 end
 
 function _getlocal(f, id, remote, args...; local_only::Bool, from::Int)
-    state = with_lock(()->datastore[id], datastore_lock)
-    lock_read(getlock!(state)) do
+    state = @safe_lock datastore_lock datastore[id]
+    @lock_read getlock!(state) begin
         if state.redirect !== nothing
             return RedirectTo(state.redirect)
         end
@@ -585,6 +657,59 @@ function _delete_device_work(state::RefState, id::Int)
     return
 end
 
+# `Base.Event`'s `set` field is declared `@atomic` on modern Julia versions, and
+# plain on older ones; probe once (at precompile time) for how it can be read.
+# If neither accessor works, we simply report "not set", which just disables the
+# inline-deletion fast path below for non-`ALWAYS_READY` states.
+const EVENT_SET_ACCESS = let ev = Base.Event()
+    if (try; (@atomic :acquire ev.set); true; catch; false; end)
+        :atomic
+    elseif (try; getfield(ev, :set); true; catch; false; end)
+        :plain
+    else
+        :none
+    end
+end
+"Returns `true` if `ev` is already set (never blocks, and is finalizer-safe)."
+@static if EVENT_SET_ACCESS === :atomic
+    _event_isset(ev::Base.Event) = (@atomic :acquire ev.set)::Bool
+else
+    @static if EVENT_SET_ACCESS === :plain
+        _event_isset(ev::Base.Event) = getfield(ev, :set)::Bool
+    else
+        _event_isset(::Base.Event) = false
+    end
+end
+
+"""
+Attempts to delete a plain in-memory ref's data inline, without going through
+the `SEND_QUEUE`. Returns `true` if the deletion was performed.
+
+This is only valid when the ref's current `StorageState` is fully settled (its
+`ready` `Event` is already set, so no storage transition is in flight), it is
+rooted on a `CPURAMDevice`, and it has no leaves (nothing has been spilled to a
+leaf device). In that case, `delete_from_device!(::CPURAMDevice, ...)` reduces
+to swapping in a `StorageState` with `data === nothing`, which we can do
+directly here, without allocating a fresh `Event` or waking the queue task.
+"""
+function _try_inline_delete!(state::RefState)
+    # N.B. `getfield` bypasses `StorageState`'s blocking `getproperty`
+    sstate = @atomic :acquire state.storage
+    ready = getfield(sstate, :ready)
+    # `ALWAYS_READY` is permanently set (and is only ever installed by a fully
+    # settled state), so it needs no further check
+    (ready === ALWAYS_READY || _event_isset(ready)) || return false
+    root = getfield(sstate, :root)
+    root isa CPURAMDevice || return false
+    isempty(getfield(sstate, :leaves)) || return false
+    getfield(sstate, :data) === nothing && return true
+    # Data is in memory and settled; drop it. The refcount for this ref has
+    # already hit zero, so no other task can be transitioning this state.
+    @atomic :release state.storage = StorageState(nothing, NO_LEAVES, root,
+                                                  ALWAYS_READY)
+    return true
+end
+
 function datastore_delete(id)
     @safe_lock_spin datastore_counters_lock begin
         DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "-- (", myid(), ", ", id, ") with ", string(datastore_counters[(myid(), id)]), "\n"; gc_context=true)
@@ -596,13 +721,18 @@ function datastore_delete(id)
         haskey(datastore, id) ? datastore[id] : nothing
     end
     (state === nothing) && return
-    # Defer device deletion onto the shared serial work queue rather than
-    # spawning a fresh task per teardown. datastore_delete frequently runs from
-    # a GC/finalizer context where task switches are illegal, so the device read
-    # and `delete_from_device!` (which may wait on an in-flight storage
+    # Fast path: a plain, settled, in-memory-only ref can be torn down inline,
+    # without waking the queue task at all (see `_try_inline_delete!`).
+    #
+    # Otherwise, defer device deletion onto the shared serial work queue rather
+    # than spawning a fresh task per teardown. datastore_delete frequently runs
+    # from a GC/finalizer context where task switches are illegal, so the device
+    # read and `delete_from_device!` (which may wait on an in-flight storage
     # transition) must not run inline here. `_enqueue_work` is finalizer-safe and
     # reuses one long-lived task, avoiding a Task allocation per ref teardown.
-    _enqueue_work(_delete_device_work, state, id; gc_context=true)
+    if !_try_inline_delete!(state)
+        _enqueue_work(_delete_device_work, state, id; gc_context=true)
+    end
     @safe_lock_spin datastore_lock begin
         haskey(datastore, id) && delete!(datastore, id)
     end
@@ -674,6 +804,10 @@ end
 
 const REDIRECT_CACHE = WeakKeyDict{DRef,DRef}()
 const REDIRECT_CACHE_LOCK = ReadWriteLock()
+# Number of entries ever added to `REDIRECT_CACHE`. Monotonically increasing
+# (entries are never subtracted), and used only to skip the `REDIRECT_CACHE`
+# lookup on the `poolget` hot path when no redirect has ever been recorded.
+const REDIRECT_COUNT = Threads.Atomic{Int}(0)
 
 ## Default data directory
 

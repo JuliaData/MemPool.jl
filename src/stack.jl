@@ -40,6 +40,26 @@ function maybepop!(stack::ConcurrentStack)
     end
 end
 
+"""
+    trypop!(stack::ConcurrentStack{T}) -> Union{T,Nothing}
+
+Like `maybepop!`, but returns the popped value directly (or `nothing` if the
+stack was empty), avoiding the `Some` allocation. N.B. This is only usable when
+`T` cannot itself hold a `nothing` value.
+"""
+function trypop!(stack::ConcurrentStack{T}) where T
+    while true
+        node = @atomic stack.next
+        node === nothing && return nothing
+
+        next = @atomic node.next
+        next, ok = @atomicreplace(stack.next, node => next)
+        if ok
+            return node.value
+        end
+    end
+end
+
 function Base.pop!(stack::ConcurrentStack)
     r = maybepop!(stack)
     if r === nothing
