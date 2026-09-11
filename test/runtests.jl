@@ -13,6 +13,7 @@ using Serialization, Random
 @everywhere using MemPool
 import MemPool: CPURAMDevice, SerializationFileDevice, SimpleRecencyAllocator
 import MemPool: storage_read
+import TimespanLogging
 using Test
 
 import Sockets: getipaddr
@@ -1001,6 +1002,159 @@ end
     x1 = poolset(123; device=sdevice, retain=true)
     @test only(storage_read(MemPool.datastore[x1.id]).leaves).retain
     MemPool.retain_on_device!(sdevice, x1, false)
+end
+
+@testset "Logging" begin
+    # Run with a clean logging state, and always restore it afterwards, since
+    # the log sink/fine-logging flags are process-global.
+    old_sink = MemPool.set_log_sink!(TimespanLogging.NoOpLog())
+    old_fine = MemPool.set_log_fine!(false)
+    try
+        @testset "sink toggling" begin
+            @test !MemPool.logging_enabled()
+            prev = MemPool.set_log_sink!(TimespanLogging.ActiveLog())
+            @test prev isa TimespanLogging.NoOpLog
+            @test MemPool.logging_enabled()
+            prev2 = MemPool.set_log_sink!(TimespanLogging.NoOpLog())
+            @test prev2 isa TimespanLogging.ActiveLog
+            @test !MemPool.logging_enabled()
+
+            @test MemPool.set_log_fine!(true) === true
+            @test MemPool.LOG_FINE[]
+            @test MemPool.set_log_fine!(false) === false
+            @test !MemPool.LOG_FINE[]
+        end
+
+        @testset "id is not constructed when logging is disabled" begin
+            @test TimespanLogging.log_sink(MemPool.MPCTX) isa TimespanLogging.NoOpLog
+            cnt = Ref(0)
+            mkid() = (cnt[] += 1; MemPool.LogPoolGetId(1, 1, UInt64(1)))
+            result = MemPool.@mplog MemPool.LogPoolGet mkid() 42
+            @test result == 42
+            @test cnt[] == 0
+        end
+
+        @testset "no events recorded while sink is NoOpLog" begin
+            r = poolset([1, 2, 3])
+            poolget(r)
+            @test isempty(TimespanLogging.steal_typed(MemPool.LogPoolSet))
+            @test isempty(TimespanLogging.steal_typed(MemPool.LogPoolGet))
+        end
+
+        @testset "poolset/poolget events" begin
+            MemPool.set_log_sink!(TimespanLogging.ActiveLog())
+
+            r = poolset([1, 2, 3, 4])
+            set_evs = TimespanLogging.steal_typed(MemPool.LogPoolSet)
+            @test length(set_evs) == 2
+            @test set_evs[1].phase == 0x00
+            @test set_evs[2].phase == 0x01
+            @test set_evs[1].id == set_evs[2].id
+            @test set_evs[1].id.size == UInt64(MemPool.approx_size([1, 2, 3, 4]))
+            @test set_evs[1].timestamp <= set_evs[2].timestamp
+
+            poolget(r)
+            get_evs = TimespanLogging.steal_typed(MemPool.LogPoolGet)
+            @test length(get_evs) == 2
+            @test get_evs[1].phase == 0x00
+            @test get_evs[2].phase == 0x01
+            @test get_evs[1].id == get_evs[2].id
+            @test get_evs[1].id.ref == r.id
+            @test get_evs[1].id.owner == r.owner
+            @test get_evs[1].timestamp <= get_evs[2].timestamp
+
+            # Each logged operation gets a fresh nonce
+            @test set_evs[1].id.u != get_evs[1].id.u
+
+            MemPool.set_log_sink!(TimespanLogging.NoOpLog())
+        end
+
+        @testset "storage_rcu! gated by LOG_FINE" begin
+            MemPool.set_log_sink!(TimespanLogging.ActiveLog())
+
+            sdevice = SerializationFileDevice(mktempdir())
+            sra = SimpleRecencyAllocator(8 * 10, sdevice, 8 * 10_000, :LRU)
+            r = poolset([1, 2]; device=sra)
+            TimespanLogging.steal_typed(MemPool.LogSRAWrite) # not under test here
+
+            # Fine-grained RCU logging defaults to off
+            MemPool.retain_on_device!(sra, r, true; all=true)
+            @test isempty(TimespanLogging.steal_typed(MemPool.LogStorageRcu))
+
+            MemPool.set_log_fine!(true)
+            MemPool.retain_on_device!(sra, r, false; all=true)
+            rcu_evs = TimespanLogging.steal_typed(MemPool.LogStorageRcu)
+            @test length(rcu_evs) == 2
+            @test rcu_evs[1].phase == 0x00
+            @test rcu_evs[2].phase == 0x01
+            @test rcu_evs[1].id == rcu_evs[2].id
+            MemPool.set_log_fine!(false)
+
+            MemPool.set_log_sink!(TimespanLogging.NoOpLog())
+        end
+
+        @testset "SimpleRecencyAllocator write/read events" begin
+            MemPool.set_log_sink!(TimespanLogging.ActiveLog())
+
+            sdevice = SerializationFileDevice(mktempdir())
+            sra = SimpleRecencyAllocator(8 * 10, sdevice, 8 * 10_000, :LRU)
+
+            r1 = poolset([1, 2]; device=sra)
+            write_evs = TimespanLogging.steal_typed(MemPool.LogSRAWrite)
+            @test length(write_evs) == 2
+            @test write_evs[1].phase == 0x00
+            @test write_evs[2].phase == 0x01
+            @test write_evs[1].id == write_evs[2].id
+            @test write_evs[1].id.ref == r1.id
+            @test write_evs[1].id.size == UInt64(MemPool.approx_size([1, 2]))
+
+            # Force an eviction of r1 to disk by filling up memory
+            poolset([1, 2, 3]; device=sra)
+            poolset([1, 2, 3, 4, 5]; device=sra)
+            poolset([1, 2]; device=sra)
+            @test sra_ondisk_pos(sra, r1, 1)
+
+            # Reading it back promotes it from disk to memory
+            @test poolget(r1) == [1, 2]
+            read_evs = TimespanLogging.steal_typed(MemPool.LogSRARead)
+            @test length(read_evs) == 2
+            @test read_evs[1].phase == 0x00
+            @test read_evs[2].phase == 0x01
+            @test read_evs[1].id == read_evs[2].id
+            @test read_evs[1].id.ref == r1.id
+
+            MemPool.set_log_sink!(TimespanLogging.NoOpLog())
+        end
+
+        @testset "ensure_memory_reserved events" begin
+            MemPool.set_log_sink!(TimespanLogging.ActiveLog())
+
+            # No reservation requested: the fast path returns before logging
+            MemPool.MEM_RESERVED[] = 0
+            MemPool.ensure_memory_reserved()
+            @test isempty(TimespanLogging.steal_typed(MemPool.LogMemReserveGC))
+
+            # An impossible-to-satisfy reservation forces the GC-sweep region,
+            # which is where the logging lives
+            MemPool.MEM_RESERVED[] = typemax(UInt)
+            try
+                MemPool.ensure_memory_reserved(0; max_sweeps=1)
+            finally
+                MemPool.MEM_RESERVED[] = 0
+            end
+            reserve_evs = TimespanLogging.steal_typed(MemPool.LogMemReserveGC)
+            @test length(reserve_evs) == 2
+            @test reserve_evs[1].phase == 0x00
+            @test reserve_evs[2].phase == 0x01
+            @test reserve_evs[1].id == reserve_evs[2].id
+            @test reserve_evs[1].id.reserve == typemax(UInt) % UInt64
+
+            MemPool.set_log_sink!(TimespanLogging.NoOpLog())
+        end
+    finally
+        MemPool.set_log_sink!(old_sink)
+        MemPool.set_log_fine!(old_fine)
+    end
 end
 
 @testset "Preferences" begin

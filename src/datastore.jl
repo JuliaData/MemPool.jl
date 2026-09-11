@@ -97,6 +97,12 @@ include("storage.jl")
 storage_read(state::RefState) = @atomic :acquire state.storage
 "Atomically replaces `state.storage` with the result of `f(state.storage)`."
 function storage_rcu!(f, state::RefState)
+    if LOG_FINE[] && logging_enabled()
+        return @mplog LogStorageRcu LogStorageRcuId(next_log_id()) _storage_rcu!(f, state)
+    end
+    return _storage_rcu!(f, state)
+end
+function _storage_rcu!(f, state::RefState)
     while true
         orig_sstate = @atomic :acquire state.storage
 
@@ -439,6 +445,9 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
         return
     end
 
+    # Memory is tight: time the GC-sweep region so reserve-driven pauses
+    # show up on the unified timeline.
+    return @mplog LogMemReserveGC LogMemReserveGCId(UInt64(MEM_RESERVED[]), next_log_id()) begin
     # Check whether the OS is running tight on memory
     sweep_ctr = 0
     while true
@@ -482,6 +491,8 @@ function ensure_memory_reserved(size::Integer=0; max_sweeps::Integer=MEM_RESERVE
     if sweep_ctr > 0
         @debug "Swept for $sweep_ctr cycles"
     end
+    return
+    end
 end
 
 poolset(@nospecialize(x), pid=myid(); size=approx_size(x),
@@ -503,6 +514,19 @@ function poolset_positional(@nospecialize(x), pid, size,
                             tag, leaf_tag,
                             destructor)
     if pid == myid()
+        return @mplog LogPoolSet LogPoolSetId(UInt64(size), next_log_id()) _poolset_local(x, pid, size, retain, restore, device, leaf_device, tag, leaf_tag, destructor)
+    else
+        # use our serialization
+        remotecall_fetch(pid, MMWrap(x)) do wx
+            poolset(unwrap_payload(wx), pid)
+        end
+    end
+end
+function _poolset_local(@nospecialize(x), pid, size,
+                        retain, restore,
+                        device, leaf_device,
+                        tag, leaf_tag,
+                        destructor)
         if !restore && MEM_RESERVED[] != 0
             @lock MEM_RESERVE_LOCK ensure_memory_reserved(size)
         end
@@ -560,12 +584,6 @@ function poolset_positional(@nospecialize(x), pid, size,
             retain_on_device!(device, state, id, true; all=true)
         end
         return d
-    else
-        # use our serialization
-        remotecall_fetch(pid, MMWrap(x)) do wx
-            poolset(unwrap_payload(wx), pid)
-        end
-    end
 end
 
 function forwardkeyerror(f)
@@ -581,6 +599,9 @@ end
 
 function poolget(ref::DRef)
     DEBUG_REFCOUNTING[] && _enqueue_work(Core.print, "?? (", ref.owner, ", ", ref.id, ") at ", myid(), "\n")
+    return @mplog LogPoolGet LogPoolGetId(ref.id, Int(ref.owner), next_log_id()) _poolget(ref)
+end
+function _poolget(ref::DRef)
     # Fast path for the overwhelmingly common case: a locally-owned,
     # unredirected, in-memory CPURAM ref. The RCU storage read needs no lock,
     # and skipping `access_ref`/`_getlocal` avoids their kwargs NamedTuple,

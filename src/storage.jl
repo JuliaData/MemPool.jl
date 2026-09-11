@@ -884,6 +884,9 @@ function storage_utilized(sra::SimpleRecencyAllocator, res::StorageResource)
 end
 storage_utilized(sra::SimpleRecencyAllocator) = sra.mem_size[] + sra.device_size[]
 function write_to_device!(sra::SimpleRecencyAllocator, state::RefState, ref_id::Int)
+    return @mplog LogSRAWrite LogSRAWriteId(ref_id, UInt64(state.size), next_log_id()) _write_to_device_sra!(sra, state, ref_id)
+end
+function _write_to_device_sra!(sra::SimpleRecencyAllocator, state::RefState, ref_id::Int)
     with_lock(sra.lock) do
         sra.ref_cache[ref_id] = state
     end
@@ -1035,6 +1038,9 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
     end
 end
 function read_from_device(sra::SimpleRecencyAllocator, state::RefState, id::Int, ret::Bool)
+    return @mplog LogSRARead LogSRAReadId(id, UInt64(state.size), next_log_id()) _read_from_device_sra(sra, state, id, ret)
+end
+function _read_from_device_sra(sra::SimpleRecencyAllocator, state::RefState, id::Int, ret::Bool)
     with_lock(sra.lock) do
         idx = findfirst(x->x==id, sra.mem_refs)
         if idx !== nothing
