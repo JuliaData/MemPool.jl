@@ -15,6 +15,13 @@ import MemPool: CPURAMDevice, SerializationFileDevice, SimpleRecencyAllocator
 import MemPool: storage_read
 using Test
 
+function wait_for_gc(check)
+    @test timedwait(10; pollint=0.05) do
+        @everywhere GC.gc()
+        check()
+    end === :ok
+end
+
 import Sockets: getipaddr
 
 function roundtrip(x, eq=(==), io=IOBuffer())
@@ -161,11 +168,11 @@ end
         @test MemPool.datastore_counters[key1].worker_counter[] == 2
 
         # Delete their copy
-        @everywhere [2] begin
-            r1_ref[] = nothing
-            GC.gc(); sleep(0.5)
+        @everywhere [2] r1_ref[] = nothing
+        wait_for_gc() do
+            fetch(@spawnat 2 !haskey(MemPool.datastore_counters, key1)) &&
+                MemPool.datastore_counters[key1].worker_counter[] == 1
         end
-        GC.gc(); sleep(0.5)
 
         # They don't know about it (anymore)
         @test fetch(@spawnat 2 !haskey(MemPool.datastore_counters, key1))
@@ -180,9 +187,13 @@ end
         key2 = (r2.owner, r2.id)
         id2 = r2.id
 
-        # Give us some time to tell them we received r2
-        @everywhere GC.gc()
-        sleep(1)
+        # Wait for the remote temporary to be collected and transfers to settle.
+        wait_for_gc() do
+            fetch(@spawnat 2 begin
+                ctrs = MemPool.datastore_counters[key2]
+                ctrs.local_counter[] == 0 && isempty(ctrs.send_counters) && isempty(ctrs.recv_counters)
+            end)
+        end
 
         # We know about this DRef
         @test haskey(MemPool.datastore_counters, key2)
