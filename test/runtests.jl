@@ -836,6 +836,58 @@ sra_ondisk_pos(sra, ref, idx) =
     @test sra.device_size[] == 0
 end
 
+@testset "Batch recency allocator migrations" begin
+    @testset "Batch memory evictions" for policy in (:LRU, :MRU), n in (2, 3)
+        sra = SimpleRecencyAllocator(3*sizeof(Int), SerializationFileDevice(), 100*sizeof(Int), policy)
+        refs = [poolset([i]; device=sra) for i in 1:3]
+        r = poolset(fill(4, n); device=sra)
+        push!(refs, r)
+        evicted = policy === :LRU ? refs[1:n] : reverse(refs[4-n:3])
+        remaining = policy === :LRU ? reverse(refs[n+1:3]) : reverse(refs[1:3-n])
+        @test sra.mem_refs == [r.id; [ref.id for ref in remaining]]
+        @test sra.device_refs == [ref.id for ref in evicted]
+        @test sra.mem_size[] == 3*sizeof(Int)
+        @test sra.device_size[] == n*sizeof(Int)
+        @test poolget(r) == fill(4, n)
+        for (i, ref) in enumerate(refs[1:3])
+            @test poolget(ref) == [i]
+        end
+        @test Set([sra.mem_refs; sra.device_refs]) == Set(ref.id for ref in refs)
+        @test length(unique([sra.mem_refs; sra.device_refs])) == 4
+    end
+
+    @testset "Batch disk evictions" for policy in (:LRU, :MRU), retained in (false, true)
+        dir = mktempdir()
+        device = SerializationFileDevice(dir)
+        sra = SimpleRecencyAllocator(100*sizeof(Int), device, 3*sizeof(Int), policy)
+        function restore(i, n)
+            path = joinpath(dir, "$(i).bin")
+            serialize(path, fill(i, n))
+            poolset(FileRef(path); size=n*sizeof(Int), device=sra, leaf_device=device, restore=true)
+        end
+        refs = [restore(i, 1) for i in 1:3]
+        retained && MemPool.retain_on_device!(device, refs[2], true)
+        @test MemPool.isretained(refs[2].id, device) == retained
+        r = restore(4, 2)
+        push!(refs, r)
+        order = policy === :LRU ? [3, 2, 1] : [1, 2, 3]
+        evicted = first(filter(i -> !retained || i != 2, order), 2)
+        remaining = only(setdiff(1:3, evicted))
+        @test sra.mem_refs == [refs[i].id for i in evicted]
+        @test sra.device_refs == [r.id, refs[remaining].id]
+        @test sra.mem_size[] == 2*sizeof(Int)
+        @test sra.device_size[] == 3*sizeof(Int)
+        @test MemPool.isretained(refs[2].id, device) == retained
+        @test poolget(r) == fill(4, 2)
+        for (i, ref) in enumerate(refs[1:3])
+            @test poolget(ref) == [i]
+        end
+        @test Set([sra.mem_refs; sra.device_refs]) == Set(ref.id for ref in refs)
+        @test length(unique([sra.mem_refs; sra.device_refs])) == 4
+    end
+
+end
+
 @testset "Mountpoints and Disk Stats" begin
     mounts = MemPool.mountpoints()
     @test mounts isa Vector{String}
