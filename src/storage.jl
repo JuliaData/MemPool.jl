@@ -515,7 +515,7 @@ returns `false` otherwise.
 """
 function isretained(state::RefState, device::StorageDevice)
     sstate = storage_read(state)
-    for leaf in leaves
+    for leaf in sstate.leaves
         if leaf.device === device && leaf.retain
             return true
         end
@@ -1004,7 +1004,7 @@ function sra_migrate!(sra::SimpleRecencyAllocator, state::RefState, ref_id, to_m
                 push!(to_delete, findfirst(==(oref), from_refs))
             end
         end
-        foreach(idx->deleteat!(from_refs, idx), reverse(to_delete))
+        deleteat!(from_refs, sort!(to_delete))
 
         @label write_ref
         # Space available, perform migration
